@@ -1,0 +1,148 @@
+FILIO — MANUAL SETUP STEPS
+==========================
+
+These must be run by the developer (not by Claude) because they touch the live Supabase database,
+external services, or require secrets that only you hold.
+
+----------------------------------------------------------
+STEP 1: Push the Drizzle schema to Supabase
+----------------------------------------------------------
+Run in terminal at the project root:
+
+    npx drizzle-kit push
+
+This creates all 11 tables + 7 enums in your Supabase PostgreSQL database.
+Confirm the diff when prompted — it should show all tables being created fresh.
+
+----------------------------------------------------------
+STEP 2: Seed the database
+----------------------------------------------------------
+Run in terminal at the project root:
+
+    npm run seed
+
+This inserts:
+  - 1 org: Sharma & Associates
+  - 6 roles: Founding Partner, Partner, Senior Manager, Manager, Article Assistant, Intern
+  - 5 clients: Rajesh Textiles, Mehta Constructions, Patel Trading Co, ABC Industries, XYZ Services
+
+----------------------------------------------------------
+STEP 3: Apply RLS policies in Supabase SQL Editor
+----------------------------------------------------------
+1. Open your Supabase project dashboard
+2. Go to SQL Editor
+3. Open the file: src/db/rls.sql
+4. Copy the entire contents and paste into the SQL Editor
+5. Click "Run"
+
+This enables Row Level Security on all 11 tables and creates the 4 security helper functions.
+
+----------------------------------------------------------
+STEP 4: Enable Realtime (for chat + notifications)
+----------------------------------------------------------
+In Supabase dashboard → Database → Replication:
+  - Enable realtime on: task_messages
+  - Enable realtime on: notifications
+  - Enable realtime on: tasks  (needed for live status updates)
+
+----------------------------------------------------------
+STEP 5: Create Supabase Storage bucket
+----------------------------------------------------------
+In Supabase dashboard → Storage:
+  - Click "New bucket"
+  - Name: task-files
+  - Toggle: Private (NOT public)
+  - File size limit: 20971520  (= 20 MB)
+  - Click "Save"
+
+Then add this RLS policy to the bucket (SQL Editor):
+  CREATE POLICY "Org members can upload" ON storage.objects
+    FOR INSERT WITH CHECK (
+      bucket_id = 'task-files'
+      AND auth.uid() IS NOT NULL
+    );
+
+  CREATE POLICY "Org members can read own org files" ON storage.objects
+    FOR SELECT USING (
+      bucket_id = 'task-files'
+      AND auth.uid() IS NOT NULL
+    );
+
+----------------------------------------------------------
+STEP 6: Create your first user
+----------------------------------------------------------
+In Supabase dashboard → Authentication → Users:
+  - Click "Add user" → "Create new user"
+  - Enter your email and a password
+  - Copy the user UUID from the users list
+
+Then in Supabase → Table Editor → profiles table → Insert row:
+  - id: <paste the UUID from above>
+  - org_id: <copy from the orgs table>
+  - role_id: <copy the Founding Partner role id from roles table>
+  - full_name: Your Name
+  - email: your@email.com
+  - is_active: true
+  - is_org_admin: true
+
+----------------------------------------------------------
+STEP 7: Set up Resend for email notifications
+----------------------------------------------------------
+1. Create a free account at https://resend.com
+2. Go to API Keys → Create API Key
+3. Copy the key and paste it into .env.local:
+     RESEND_API_KEY=re_your_actual_key_here
+4. In Resend dashboard → Domains: add and verify your sending domain
+   (or use the free onboarding@resend.dev address for testing)
+5. Update the FROM address in src/app/api/cron/digest/route.ts if needed
+
+----------------------------------------------------------
+STEP 8: Set the CRON_SECRET for cron job security
+----------------------------------------------------------
+.env.local already has:
+  CRON_SECRET=hello_my_name_is_Anmol
+
+For production (Vercel), add this same value to:
+  Vercel Dashboard → Your Project → Settings → Environment Variables
+  Key: CRON_SECRET
+  Value: hello_my_name_is_Anmol  (or generate a stronger random string)
+
+The vercel.json cron config will call /api/cron/recurring and /api/cron/digest
+with this secret in the Authorization header.
+
+----------------------------------------------------------
+STEP 9: Vercel deployment (Session 7)
+----------------------------------------------------------
+1. Push code to GitHub
+2. Connect repo to Vercel
+3. Add ALL env vars from .env.local to Vercel:
+     NEXT_PUBLIC_SUPABASE_URL
+     NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+     SUPABASE_SECRET_KEY
+     DATABASE_URL
+     DATABASE_URL_DIRECT
+     NEXT_PUBLIC_APP_URL  (set to your Vercel domain, e.g. https://filio.vercel.app)
+     RESEND_API_KEY
+     CRON_SECRET
+4. Deploy → copy production URL → update NEXT_PUBLIC_APP_URL
+
+----------------------------------------------------------
+STEP 10: Update Supabase Auth callback URL for production
+----------------------------------------------------------
+In Supabase dashboard → Authentication → URL Configuration:
+  - Site URL: https://your-app.vercel.app
+  - Redirect URLs: add https://your-app.vercel.app/auth/callback
+
+----------------------------------------------------------
+STATUS
+----------------------------------------------------------
+[ ] Step 1 — drizzle-kit push
+[ ] Step 2 — npm run seed
+[ ] Step 3 — RLS policies applied
+[ ] Step 4 — Realtime enabled (task_messages, notifications, tasks)
+[ ] Step 5 — Storage bucket created with policies
+[ ] Step 6 — First user created with profile row
+[ ] Step 7 — Resend configured
+[ ] Step 8 — CRON_SECRET confirmed
+[ ] Step 9 — Vercel deployment (Session 7)
+[ ] Step 10 — Auth callback URL updated for production

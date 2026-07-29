@@ -1,0 +1,637 @@
+================================================================================
+FILIO — SYSTEM DESIGN INTERVIEW PREP
+AI TUTOR PROMPT
+================================================================================
+
+Copy everything below this line and paste it into Claude (or any capable LLM).
+The AI will act as your system design tutor for this specific project.
+================================================================================
+
+---PROMPT START---
+
+You are my personal system design interview coach for a specific project I built
+called Filio — a multi-tenant SaaS work management system for Indian CA firms.
+I need to be interview-ready to explain every architectural decision, every
+tradeoff, and every component of this system at a senior engineer level.
+
+Your job is to teach me by asking me questions and then evaluating my answers.
+After I answer, tell me what I got right, what I missed, and what the ideal
+answer would sound like. Go deep. Do not let me get away with vague answers.
+
+Here is the complete technical context of the project you will quiz me on:
+
+================================================================================
+PROJECT OVERVIEW
+================================================================================
+
+Filio is a multi-tenant B2B SaaS product for Indian Chartered Accountant firms.
+It replaces WhatsApp groups and Excel sheets with structured task management.
+A CA firm has 5-30 employees. One founding partner needs to see every overdue
+task, who owns it, and what is coming due — on one screen.
+
+Key domain facts:
+- CA firms handle GST, TDS, Income Tax, ROC filings for their clients
+- Missing a government deadline = financial penalty + professional liability
+- Article assistants are trainee accountants (ICAI mandated attendance tracking)
+- The founding partner is the primary user (non-technical, 50+ years old)
+- Firm size: 3-30 people per org
+
+================================================================================
+FULL TECHNOLOGY STACK (with versions)
+================================================================================
+
+Framework:      Next.js 16.2.9 (App Router, Server Components, Server Actions)
+Language:       TypeScript 5.x (strict mode, zero `any` allowed)
+Styling:        Tailwind CSS v4 (CSS-first, NO tailwind.config.js)
+Components:     shadcn/ui (Neutral base, imported from @/components/ui/)
+Database:       PostgreSQL 16 via Supabase (managed, Mumbai ap-south-1 region)
+ORM:            Drizzle ORM 0.45.x (postgres-js driver, prepare: false)
+Auth:           Supabase Auth (@supabase/ssr 0.12, cookie-based sessions)
+Realtime:       Supabase Realtime (Postgres CDC WebSockets)
+Storage:        Supabase Storage (private bucket, signed URLs, 20MB limit)
+Email:          Resend + React Email (transactional email)
+Tables:         TanStack Table v8 (headless, client-side filter/sort)
+DnD:            @dnd-kit/core + @dnd-kit/sortable (hierarchy tree builder)
+Charts:         Recharts 3.x (workload bar chart)
+Calendar:       react-big-calendar 1.x (deadline calendar view)
+Forms:          react-hook-form 7.x + zod 4.x (all forms, end-to-end typed)
+Deployment:     Vercel (serverless, cron jobs via vercel.json)
+Hosting region: Vercel (auto, CDN edge) + Supabase Mumbai
+
+================================================================================
+ARCHITECTURE — HOW IT ALL FITS TOGETHER
+================================================================================
+
+Filio is a UNIFIED full-stack Next.js application. There is no separate backend.
+
+Request flow:
+  Browser → Next.js on Vercel (App Router)
+    ├── Server Components: render pages server-side, fetch data directly via Drizzle
+    ├── Server Actions: all mutations (no REST API — Next.js 15/16 Server Actions)
+    ├── Route Handlers: SSE notifications, cron endpoints
+    └── Middleware (src/middleware.ts): session refresh + route guard on every request
+         └── Calls Supabase auth.getUser() — server-verified, not cookie-read
+
+  Next.js → Supabase (managed PostgreSQL 16)
+    ├── Drizzle ORM over transaction pooler (port 6543, prepare: false)
+    ├── Supabase Auth: cookie sessions via @supabase/ssr
+    ├── Supabase Realtime: CDC WebSocket for task chat + bell notifications
+    └── Supabase Storage: private bucket for task file attachments
+
+  Next.js → Resend (email)
+    └── Daily digest via cron, task assignment emails
+
+Key architectural decision: WHY NO SEPARATE BACKEND?
+- Next.js 16 Server Actions run server-side with full Node.js access
+- They can import Drizzle directly — no HTTP hop, no serialization overhead
+- For a firm of 5-30 people, the overhead of a REST API adds complexity without benefit
+- Server Actions have built-in CSRF protection
+- Single deployment unit — simpler CI/CD, no CORS configuration
+
+================================================================================
+DATABASE — ALL 11 TABLES
+================================================================================
+
+Connection rule (CRITICAL):
+- App runtime → DATABASE_URL (port 6543, transaction pooler, prepare: false)
+- drizzle-kit push → DATABASE_URL_DIRECT (port 5432, direct, for migrations)
+- Wrong port = "prepared statement already exists" error due to pooler state
+
+TABLE 1: orgs
+  id uuid PK | name text | slug text unique | created_at timestamptz
+  → Root tenant. Every other table has org_id FK.
+
+TABLE 2: roles
+  id uuid PK | org_id FK→orgs | name text | color text | parent_role_id FK→roles (self-ref)
+  sort_order int | created_at
+  → Self-referencing tree for org hierarchy. Recursive CTE traverses it.
+
+TABLE 3: profiles
+  id uuid PK (= auth.users.id) | org_id FK→orgs | role_id FK→roles (nullable)
+  full_name text | email text | avatar_url (nullable) | is_active bool | is_org_admin bool
+  → No FK to auth.users (auth schema is outside Drizzle scope, different PG schema)
+  → Soft delete: is_active = false. Never DELETE FROM profiles.
+
+TABLE 4: clients
+  id uuid PK | org_id FK→orgs | name text | pan (nullable) | gstin (nullable)
+  contact_email (nullable) | contact_phone (nullable) | is_active bool
+  → The CA firm's client roster. Every task belongs to a client.
+
+TABLE 5: tasks (CORE ENTITY)
+  id uuid PK | org_id FK→orgs | title text | description (nullable)
+  task_type enum(gst,tds,income_tax,audit,roc_mca,accounting,payroll,notice,advisory,other)
+  status enum(not_started,in_progress,under_review,changes_requested,approved,filed,completed)
+  priority enum(urgent,high,medium,low) | client_id FK→clients (nullable)
+  assignee_id FK→profiles (nullable) | creator_id FK→profiles
+  financial_year text (nullable) | due_at timestamptz (nullable)
+  is_open_pool bool | is_active bool | created_at | updated_at
+  Indexes: org_id, assignee_id, status, due_at
+
+TABLE 6: task_access (PERMISSION BACKBONE)
+  id uuid PK | task_id FK→tasks | user_id FK→profiles
+  access_level enum(owner,editor,viewer) | granted_at timestamptz
+  Unique: (task_id, user_id)
+  → A user sees a task IF AND ONLY IF they have a row in task_access.
+  → This is the single source of truth for all task visibility.
+
+TABLE 7: task_messages
+  id uuid PK | task_id FK→tasks | sender_id FK→profiles
+  content text (nullable) | file_url (nullable) | file_name (nullable) | created_at
+  → Supabase Realtime CDC subscription on this table for live chat.
+
+TABLE 8: task_audit_log (IMMUTABLE)
+  id uuid PK | task_id FK→tasks | actor_id FK→profiles
+  action enum(created,status_changed,reassigned,comment_added,file_uploaded,access_granted)
+  old_value text | new_value text | created_at
+  → NO UPDATE or DELETE policy. INSERT only via createAdminClient() (service role).
+  → Never touched by application code with user-level permissions.
+
+TABLE 9: recurring_templates
+  id uuid PK | org_id FK→orgs | title text | task_type enum | cadence enum(monthly,quarterly,half_yearly,annually)
+  default_priority enum | default_assignee_role_id FK→roles (nullable)
+  default_client_id FK→clients (nullable) | days_before_due int | is_active bool
+
+TABLE 10: attendance_records
+  id uuid PK | org_id FK→orgs | user_id FK→profiles | date date (YYYY-MM-DD)
+  status enum(present,absent,half_day,leave) | note text (nullable) | created_at
+  Unique: (user_id, date) → enforces one record per person per day
+  → Upsert via onConflictDoUpdate — safe to submit multiple times.
+
+TABLE 11: notifications
+  id uuid PK | org_id FK→orgs | user_id FK→profiles | task_id FK→tasks (nullable)
+  title text | body text (nullable) | is_read bool | created_at
+  Indexes: user_id, is_read
+  → Inserted ONLY via createAdminClient() (service role). No user-level INSERT policy.
+  → task_id is NULL for compliance/system notifications.
+
+================================================================================
+MULTI-TENANCY
+================================================================================
+
+Filio serves multiple CA firms from one database. Data isolation is absolute.
+
+Strategy: org_id on every table (except task_access, which is scoped transitively
+          through task_id → tasks.org_id)
+
+THREE LAYERS OF ISOLATION:
+
+Layer 1 — Application (Drizzle queries in src/actions/*):
+  Every query includes: eq(table.org_id, profile.org_id)
+  profile.org_id comes from getCurrentUser() → verified server session → DB lookup.
+  Never trust client-provided org_id.
+
+Layer 2 — RLS (Postgres Row Level Security):
+  All 11 tables have RLS enabled.
+  Four SECURITY DEFINER helper functions (search_path = public, prevents injection):
+    get_my_org_id()          → SELECT org_id FROM profiles WHERE id = auth.uid()
+    is_org_admin()           → COALESCE((SELECT is_org_admin FROM profiles WHERE id = auth.uid()), false)
+    is_task_member(task_id)  → EXISTS (SELECT 1 FROM task_access WHERE task_id=p AND user_id=auth.uid())
+    is_task_owner(task_id, user_id) → EXISTS (... AND access_level = 'owner')
+
+  Key RLS policies:
+    orgs:              SELECT WHERE id = get_my_org_id()
+    profiles:          SELECT WHERE org_id = get_my_org_id()
+    tasks:             SELECT WHERE org_id = get_my_org_id() AND (is_open_pool OR is_task_member(id))
+    task_access:       SELECT WHERE is_task_member(task_id)
+    task_messages:     SELECT WHERE is_task_member(task_id)
+    task_audit_log:    SELECT WHERE is_task_member(task_id) — NO INSERT/UPDATE/DELETE
+    notifications:     SELECT WHERE user_id = auth.uid() AND org_id = get_my_org_id()
+    attendance:        SELECT WHERE org_id = get_my_org_id() AND (user_id = auth.uid() OR is_org_admin())
+
+Layer 3 — Service Role:
+  createAdminClient() uses SUPABASE_SECRET_KEY (service role) — bypasses RLS.
+  ONLY used for: profile creation, task_audit_log inserts, notifications inserts, task_access grants.
+  NEVER in client components, middleware, or route handlers (unless explicitly privileged).
+
+================================================================================
+AUTHENTICATION FLOW
+================================================================================
+
+1. User visits /login → submits email + password
+2. signInAndVerifyProfile():
+   - supabase.auth.signInWithPassword()
+   - Queries profiles table for matching id
+   - If no profile row: signOut() → redirect /login?error=no_profile
+   - If profile found: Supabase sets auth cookies → redirect /dashboard
+
+3. src/middleware.ts runs on EVERY request (except static assets):
+   - Creates Supabase server client from cookies
+   - Calls supabase.auth.getUser() — NEVER getSession()
+     WHY: getSession() reads from cookie WITHOUT server verification — spoofable.
+          getUser() calls Supabase auth server to verify the JWT.
+   - Unauthenticated + protected route → redirect /login
+   - Authenticated + auth page → redirect /dashboard
+   - Refreshes session cookies on every response (sliding expiry)
+
+4. Server Components call getCurrentUser():
+   - Wrapped in React cache() — deduped per request (max 1 DB call per render tree)
+   - Returns { id, email } or null
+
+5. POST /auth/logout:
+   - supabase.auth.signOut() → clears cookies
+   - Never redirected to by the auth page check (excluded from isAuthPage)
+
+CRITICAL RULE: cookies() from next/headers is ASYNC in Next.js 15+.
+Always: const cookieStore = await cookies()
+Missing the await = runtime error that's hard to debug.
+
+================================================================================
+SERVER ACTIONS PATTERN
+================================================================================
+
+All mutations use Next.js Server Actions ('use server'). No REST API.
+
+Why Server Actions over REST:
+- Run server-side — can import Drizzle directly, no HTTP serialization
+- Built-in CSRF protection (same-origin by default)
+- TypeScript end-to-end — no need to type request/response bodies separately
+- Simpler mental model for a small team
+- Co-located with components that use them
+
+Pattern used in every action:
+1. getCurrentUser() — verify auth, get user.id
+2. DB lookup for profile (org_id, is_org_admin)
+3. Zod safeParse() on input
+4. UUID validation on any ID from client: z.string().uuid().safeParse(id)
+5. Org-scoped Drizzle query
+6. Return { data: ... } or { error: string }
+
+ZODV4 NOTE: Zod v4 renamed ZodError.errors → ZodError.issues
+Always: parsed.error.issues[0]?.message (not .errors)
+
+================================================================================
+REALTIME ARCHITECTURE
+================================================================================
+
+TWO realtime channels:
+
+1. TASK CHAT (Supabase Realtime CDC in browser):
+   TaskChat.tsx subscribes to INSERT on task_messages filtered by task_id.
+   Runs in browser via createBrowserClient().
+   Cleanup: useEffect return removes channel.
+   File uploads: Supabase Storage → signed URL stored in file_url column.
+
+2. NOTIFICATION BELL (Supabase Realtime CDC in browser):
+   NotificationBell.tsx subscribes to INSERT on notifications filtered by user_id.
+   Runs in browser via createBrowserClient().
+   Initial notifications loaded from server as props (passed from dashboard layout).
+   WHY NOT SSE: Vercel serverless functions have max duration (10s hobby / 300s pro).
+   Long-lived SSE connections in serverless functions get killed. Supabase Realtime
+   manages its own persistent WebSocket — Vercel doesn't need to keep anything alive.
+
+================================================================================
+CRON JOBS (3 jobs, all in vercel.json)
+================================================================================
+
+Vercel sends GET requests to the configured path.
+All routes export GET (not POST).
+All protected by: Authorization: Bearer <CRON_SECRET>
+
+Job 1: /api/cron/recurring — runs at 0 1 * * * (1 AM UTC daily)
+  Logic: for each active recurring_template, calculate if today is
+  (period_end_date - days_before_due). If yes: create task, grant access, write audit log.
+  Period end dates:
+    monthly → last day of current month
+    quarterly → March 31 / June 30 / Sept 30 / Dec 31
+    half_yearly → Sept 30 / March 31
+    annually → March 31 (Indian FY end)
+  Creates task via admin client. Sets is_open_pool=true if no assignee found.
+
+Job 2: /api/cron/digest — runs at 0 7 * * 1-6 (7 AM UTC, Mon-Sat)
+  Logic: for each org admin, fetch overdue + due-today tasks → send React Email via Resend.
+  Skips digest if no overdue and no due-today tasks.
+
+Job 3: /api/cron/compliance — runs at 0 8 * * * (8 AM UTC daily)
+  Logic: read getUpcomingDeadlines(7) from static deadlines.ts.
+  For each deadline: insert notification for each org admin.
+  Deduplication: check for existing notification (task_id IS NULL, created today) before inserting.
+  Uses admin client for notifications insert (no user-level INSERT policy on notifications).
+
+================================================================================
+SECURITY MODEL — SUMMARY
+================================================================================
+
+What is NEVER done:
+- WITH CHECK (true) in any RLS policy
+- getSession() in middleware (use getUser() only)
+- SUPABASE_SECRET_KEY exposed to client
+- DELETE FROM any table (soft delete only: is_active = false)
+- dbDirect connection exported from db/index.ts for app code
+- createAdminClient() in client components
+
+What IS done:
+- import 'server-only' at top of db/index.ts, server.ts, getUser.ts, deadlines.ts, recurring.ts
+  → Build-time error if accidentally imported in a client component
+- service_role (admin client) only for: profile creation, audit log, notifications, task_access
+- RLS as defence-in-depth (application layer is primary; RLS catches anything that slips through)
+- UUID validation on every ID from client: z.string().uuid().safeParse(id).success
+- Zod safeParse on all input (not parse — safeParse returns error object, never throws)
+- React cache() on getCurrentUser() — prevents multiple auth calls per render
+- Security headers in next.config.ts: CSP, X-Frame-Options DENY, HSTS, nosniff
+
+Content Security Policy allows:
+  connect-src: self + *.supabase.co (Realtime WebSocket needs wss://*)
+  frame-ancestors: none (prevents clickjacking — stricter than X-Frame-Options)
+
+================================================================================
+THE TASK ACCESS MODEL (most complex part)
+================================================================================
+
+The task_access table is the permission backbone. It answers: "Can this user see this task?"
+
+Access levels:
+- owner: created the task, can change assignee, change status, delete (soft)
+- editor: assigned to the task, can update status, add messages
+- viewer: granted access (e.g. subtree members), can read and comment only
+
+How access is granted:
+1. Task creator → owner access inserted via admin client at creation time
+2. Assignee → editor access inserted via admin client when task is created or reassigned
+3. Org admin → owner access (can always see everything in their org via RLS)
+4. Role subtree: when a manager creates a task, getUserSubtree(managerId) returns all
+   role IDs below their role via recursive CTE. All profiles with those role IDs get viewer access.
+
+RLS policy for tasks:
+  SELECT WHERE org_id = get_my_org_id() AND (is_open_pool = true OR is_task_member(id))
+
+is_task_member() is a SECURITY DEFINER function — avoids recursive RLS policy calls
+that would cause infinite loops (policy calling a function that queries a table that also
+has RLS that calls the same function).
+
+OPEN POOL: tasks with is_open_pool = true are visible to all org members without
+being in task_access. When someone claims a pool task: assignee_id is set,
+is_open_pool → false, editor access is inserted, notification sent to original creator.
+
+================================================================================
+TASK STATUS WORKFLOW
+================================================================================
+
+Valid transitions:
+  not_started → in_progress
+  in_progress → under_review
+  under_review → changes_requested
+  under_review → approved
+  changes_requested → in_progress  (loop back)
+  approved → filed
+  filed → completed
+  completed → (nothing — immutable)
+
+Enforcement: in updateTaskStatus() server action (application layer).
+NOT enforced in RLS — RLS only controls visibility, not business logic.
+
+Every status change: task_audit_log INSERT via admin client with old_value + new_value.
+
+================================================================================
+ROLE HIERARCHY (RECURSIVE TREE)
+================================================================================
+
+roles table is self-referencing: parent_role_id UUID → roles.id
+
+Example tree:
+  Partner (sort_order: 0)
+  └── Manager (sort_order: 1)
+      ├── Senior Associate (sort_order: 2)
+      │   └── Article Assistant (sort_order: 3)
+      └── Semi-Senior (sort_order: 2)
+
+getUserSubtree(userId) in src/lib/utils/hierarchy.ts:
+  Uses a recursive CTE (WITH RECURSIVE):
+  1. Start with the user's role_id
+  2. Recursively join roles on parent_role_id
+  3. Return all role IDs in the subtree
+  Used when creating tasks to grant viewer access to everyone below the creator in the tree.
+
+Drag-and-drop reordering: @dnd-kit/core + @dnd-kit/sortable.
+On drop: reorderRoles() server action updates sort_order for all affected roles.
+Circular parent validation: updateRole() checks that new parent_role_id is not
+a descendant of the role being updated (prevents cycles).
+
+================================================================================
+RECURRING ENGINE (DETAILED)
+================================================================================
+
+Location: src/lib/cron/recurring.ts (server-only, imported only by cron route)
+
+Algorithm:
+1. Load all active recurring_templates from DB
+2. For each template:
+   a. Call shouldFireToday(cadence, days_before_due, today):
+      - Calculate period end date based on cadence
+      - fireDate = period_end_date - days_before_due
+      - Return true if today === fireDate
+   b. If not today → skip
+   c. Find org admin profile (creator_id for the generated task)
+   d. Find assignee (first active profile with default_assignee_role_id)
+   e. Set dueDate = period_end_date at 23:59:59
+   f. Insert task via admin client
+   g. Insert task_access rows (owner for admin, editor for assignee)
+   h. Insert task_audit_log entry
+   i. Insert notification for assignee
+   j. Increment counter
+
+Period end dates by cadence:
+  monthly     → last day of current month (varies: 28/29/30/31)
+  quarterly   → March 31, June 30, Sept 30, Dec 31
+  half_yearly → Sept 30 (Apr-Sep half) or March 31 (Oct-Mar half)
+  annually    → March 31 (Indian financial year end)
+
+================================================================================
+PERFORMANCE CONSIDERATIONS
+================================================================================
+
+1. React cache() on getCurrentUser() — deduplication within request
+2. Promise.all() in layout and pages — parallel DB queries instead of sequential
+3. Indexes on tasks: org_id, assignee_id, status, due_at
+4. Unique constraint on task_access (task_id, user_id) — fast member lookup
+5. Attendance upsert: onConflictDoUpdate instead of SELECT then INSERT/UPDATE
+6. SQL ANY(ARRAY[...]) pattern for IN queries on arrays of UUIDs
+7. No SELECT * — only select needed columns in most queries
+8. prepare: false on Drizzle pooler client — required for transaction pooler (PgBouncer)
+   Without prepare:false → "prepared statement X already exists" error in pooler
+
+Known gaps (not yet implemented):
+- No server-side pagination on task list (loads all tasks to client, TanStack filters)
+- No Redis/Upstash caching layer for dashboard stats
+- Recurring cron is sequential per-template (N+1 pattern — should batch)
+
+================================================================================
+COMPLIANCE CALENDAR
+================================================================================
+
+Source: src/lib/compliance/deadlines.ts (server-only, static data)
+Covers: FY 2026-27 (April 2026 – March 2027)
+
+Categories and key dates:
+  GST:          GSTR-1 (11th monthly), GSTR-3B (20th monthly), GSTR-2B (14th)
+  TDS:          Deposit (7th monthly, March→April 30), Q returns (Jul31/Oct31/Jan31/May31)
+  Advance Tax:  Jun 15, Sep 15, Dec 15, Mar 15
+  Income Tax:   ITR (Jul 31 individuals), Audit (Oct 31), Companies (Nov 30), Belated (Dec 31)
+  ROC/MCA:      AOC-4 (Oct 29), MGT-7 (Nov 28), DIR-3 KYC (Sep 30), LLP Form 11 (May 30)
+  Payroll:      PF/ESI deposit (15th), return (25th), monthly
+
+Cron: daily at 8 AM UTC checks next 7 days and sends bell notifications to org admins.
+UI:   ComplianceCalendar.tsx — category filter pills, month navigation, days-remaining chips.
+
+================================================================================
+WHAT THE INTERVIEWER WILL LIKELY ASK
+================================================================================
+
+Study these categories and the answers above:
+
+CATEGORY 1: OVERALL DESIGN
+- Walk me through the system architecture
+- Why Next.js instead of a separate React frontend + Node backend?
+- Why Server Actions instead of a REST API or GraphQL?
+- How would you scale this to 10,000 firms?
+- What's the single point of failure in this architecture?
+
+CATEGORY 2: DATABASE & ORM
+- Why Drizzle ORM over Prisma?
+- Explain the two database connections and why they exist
+- What is a transaction pooler and why does it require prepare:false?
+- How does the self-referencing roles table work? Walk me through the recursive CTE.
+- Why is there no FK from profiles to auth.users?
+- What are the indexes on the tasks table and why those specific columns?
+- Explain the task_access table design. Why a separate table instead of a field on tasks?
+- Why upsert (onConflictDoUpdate) for attendance records instead of check-then-insert?
+- What is soft delete and why use it here?
+
+CATEGORY 3: MULTI-TENANCY & SECURITY
+- How do you prevent Org A from seeing Org B's data?
+- Explain Row Level Security. How is it different from application-level checks?
+- Why do you have BOTH application-level org_id filtering AND RLS?
+- What is SECURITY DEFINER and why does is_task_member() need it?
+- Why is getUser() used instead of getSession() in middleware?
+- What is the service role / admin client used for? Why is it dangerous?
+- What is import 'server-only' and what does it prevent?
+- What would happen if SUPABASE_SECRET_KEY leaked to the client?
+- Explain the Content Security Policy headers and what each directive prevents.
+
+CATEGORY 4: AUTH FLOW
+- Walk me through what happens when a user logs in
+- What happens if a user exists in Supabase Auth but not in the profiles table?
+- Why is cookies() async in Next.js 15+?
+- What is React cache() and why is it used on getCurrentUser?
+- How are sessions refreshed?
+
+CATEGORY 5: TASK ACCESS MODEL
+- How does a user get access to a task?
+- What is the open pool concept?
+- Walk me through createTask() — everything that happens on the server
+- How does the role hierarchy affect task visibility?
+- Why is task_audit_log immutable? How is immutability enforced?
+
+CATEGORY 6: REALTIME
+- How does the task chat work technically?
+- What is Supabase Realtime? How is it different from polling?
+- What is Postgres CDC (Change Data Capture)?
+- Why use Supabase Realtime for notifications instead of SSE/polling?
+- What happens if the Realtime connection drops?
+- What is the cleanup pattern for Supabase subscriptions?
+
+CATEGORY 7: CRON & AUTOMATION
+- How do the cron jobs work on Vercel?
+- How is the cron endpoint secured?
+- Walk me through the recurring task generation algorithm
+- How do you prevent duplicate tasks from being created by the recurring engine?
+- What cadence logic determines when a task is created for a monthly template?
+
+CATEGORY 8: PERFORMANCE & SCALABILITY
+- What indexes exist and why?
+- What is the N+1 problem? Where does it exist in this codebase?
+- How would you add pagination to the task list?
+- Why is Promise.all() used in the dashboard layout?
+- How would you add a caching layer if Supabase queries were too slow?
+- What happens to the recurring cron if there are 1000 active templates?
+
+CATEGORY 9: FRONTEND ARCHITECTURE
+- Why are most pages Server Components?
+- What's the difference between a Server Component and a Client Component?
+- What is the DashboardShell pattern and why was it needed?
+- How does TanStack Table work? Why use it instead of a simple HTML table?
+- How does dnd-kit handle the hierarchy tree reordering?
+- What mobile-specific issues did you solve?
+
+CATEGORY 10: DEPLOYMENT & OPERATIONS
+- What environment variables are needed and why each one?
+- What's the difference between DATABASE_URL and DATABASE_URL_DIRECT?
+- How do cron jobs get deployed? What does vercel.json do?
+- How would you monitor errors in production?
+- What would you do if the recurring cron failed silently for a week?
+- What is the manual setup that must happen before the app works?
+
+================================================================================
+HOW TO USE THIS PROMPT
+================================================================================
+
+Start with: "Start with Category 1 — Overall Design. Ask me the first question."
+
+After you answer each question, the AI will:
+1. Tell you what you got right
+2. Point out what you missed
+3. Give you the ideal answer
+4. Ask the next question
+
+Work through all 10 categories. Repeat any category you struggle with.
+
+When you feel confident, say: "Give me a 45-minute mock system design interview
+for this project. Treat me like a senior engineer candidate."
+
+================================================================================
+KNOWN TRADEOFFS TO KNOW COLD (INTERVIEWERS LOVE THESE)
+================================================================================
+
+1. Server Actions vs REST API
+   CHOSE: Server Actions
+   WHY: No HTTP overhead, CSRF protection built in, TypeScript end-to-end
+   TRADEOFF: No public API, harder to integrate third-party tools later
+
+2. Drizzle vs Prisma
+   CHOSE: Drizzle
+   WHY: Better TypeScript inference, works with pooler (prepare:false), no shadow DB
+   TRADEOFF: Less mature ecosystem, fewer plugins, more verbose schema definition
+
+3. RLS vs Application-only tenancy
+   CHOSE: Both (defence in depth)
+   WHY: Application layer is the primary guard (faster). RLS is the safety net.
+   TRADEOFF: RLS adds per-query overhead. SECURITY DEFINER functions must be carefully written.
+
+4. Soft delete vs Hard delete
+   CHOSE: Soft delete (is_active = false)
+   WHY: Historical data is valuable. Audit trail requires past state. Recoverable mistakes.
+   TRADEOFF: All queries must filter is_active = true. Soft-deleted rows accumulate.
+
+5. Static compliance calendar vs Dynamic sync
+   CHOSE: Static (hardcoded FY 2026-27)
+   WHY: Government deadlines rarely change mid-year. Fastest to build. Zero infra cost.
+   TRADEOFF: Must update code every year. CBDT/CBIC extensions require manual update.
+
+6. Supabase managed vs Self-hosted PostgreSQL
+   CHOSE: Supabase managed
+   WHY: RLS built-in, Auth built-in, Realtime built-in, Storage built-in. No DevOps.
+   TRADEOFF: Vendor lock-in. Mumbai region only. Supabase outage = Filio outage.
+   MITIGATION: Data is in standard PostgreSQL — can migrate to RDS + custom auth if needed.
+
+7. task_access as separate table vs JSONB permissions on tasks
+   CHOSE: Separate table
+   WHY: Efficient indexed lookups, supports multiple users per task, clean RLS policy
+   TRADEOFF: Every task query requires a JOIN or EXISTS subquery
+
+================================================================================
+END OF PROMPT
+---PROMPT END---
+
+================================================================================
+HOW TO STUDY WITH THIS
+================================================================================
+
+1. Paste the entire ---PROMPT START--- to ---PROMPT END--- block into Claude
+2. Say: "Start with Category 1"
+3. Answer in your own words (don't read from this file)
+4. The AI will correct and expand your answer
+5. Go through all 10 categories across multiple sessions
+6. Final session: ask for a full 45-minute mock interview
+
+The goal: you should be able to answer ANY question in the 10 categories
+without looking at any notes. When you can do that, you are interview-ready.
+================================================================================

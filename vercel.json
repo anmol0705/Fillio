@@ -1,0 +1,16 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/recurring",
+      "schedule": "0 1 * * *"
+    },
+    {
+      "path": "/api/cron/digest",
+      "schedule": "0 7 * * 1-6"
+    },
+    {
+      "path": "/api/cron/compliance",
+      "schedule": "0 8 * * *"
+    }
+  ]
+}

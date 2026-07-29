@@ -1,0 +1,2511 @@
+================================================================================
+FILIO — COMPLETE SYSTEM DESIGN DOCUMENT
+================================================================================
+Version: 1.0
+Date: 2026-06-22
+Author: Architecture derived from codebase analysis
+Audience: Founder, lead engineers, any developer onboarding to the project
+================================================================================
+
+
+================================================================================
+SECTION 1 — PRODUCT OVERVIEW
+================================================================================
+
+What Filio Is
+-------------
+Filio is a work management SaaS built specifically for Chartered Accountant (CA)
+firms in India. It is not a generic project manager bolted onto accounting. It
+understands the CA firm's specific task taxonomy, India's statutory compliance
+calendar, the hierarchical structure of a CA firm's team, and the CA firm's
+recurring filing cycles.
+
+The Core Problem
+----------------
+Indian CA firms — typically 5 to 50 people — run almost entirely on WhatsApp.
+Partner assigns work via a message to a group. Nobody knows what was actually
+assigned. Reminders are sent again. The same task gets done twice, or not at
+all. When the client calls asking about their GST filing, the partner has to
+scroll through three WhatsApp groups to find out who was working on it, and
+then call that person to get a status update.
+
+The result is not just inefficiency — it is a liability. Missed statutory
+deadlines carry late fees, penalties, and in serious cases, professional
+consequences for the CA. There is no audit trail. There is no accountability.
+There is no way to know, at a glance, what is overdue and who owns it.
+
+The Solution
+------------
+Filio replaces WhatsApp as the coordination layer. Every task is created with
+an assignee, a type (GST, TDS, Income Tax, etc.), a client, a financial year,
+a priority, and a due date. Tasks move through a defined status workflow. Every
+status change, comment, file upload, and reassignment is recorded in an
+immutable audit log. The founding partner opens one screen and sees exactly
+what is overdue, who owns it, and what is coming due this week. Statutory
+compliance deadlines for the full financial year are loaded into the system and
+the team is notified automatically. Recurring tasks (monthly GSTR-3B, quarterly
+TDS returns, etc.) are generated automatically from templates. Chat happens
+inside the task itself, not on WhatsApp, so the context stays attached to the
+work.
+
+Target User
+-----------
+The primary user is the founding partner of a CA firm with 5 to 50 people. They
+have articleship trainees, managers, and sometimes one or two other partners.
+They are not technical. They need information density on one screen. They care
+about deadlines more than features. The product must be fast, clear, and
+unambiguous about what is red (overdue) and what needs attention today.
+
+Current Status
+--------------
+As of the document date (2026-07-18), the entire application is feature-complete
+and production-grade. The following has been built:
+
+  - Complete database schema (11 tables, 7 enums, all indexes including 7
+    additional query-path indexes added during production audit)
+  - Row Level Security policies for all 11 tables, with profiles_update_own
+    hardened to prevent self-promotion via WITH CHECK clause
+  - Supabase authentication integration (server client + browser client)
+  - Middleware route protection (proxy.ts + middleware.ts re-export)
+  - Full task engine (create, update, status transitions, soft delete,
+    task access control, audit log, notifications, orphan rollback)
+  - Attendance management (mark, bulk mark, monthly summary)
+  - Recurring task engine (template-driven, cadence-aware, cron-triggered,
+    with corrected half_yearly Indian FY logic and orphan rollback)
+  - Compliance calendar with dynamic FY generation (never hardcoded)
+  - Notification bell via Supabase Realtime (browser-side WebSocket)
+  - Daily digest email cron endpoint (batched queries, parallel sends)
+  - Three Vercel cron jobs configured (recurring, digest, compliance)
+    — all use GET method, maxDuration=300, structured JSON logging
+  - /api/health DB ping endpoint
+  - Healthchecks.io dead-man's-switch support on all crons
+  - Seed data for initial firm setup (with production guard)
+  - All UI components: dashboard, task list, task detail, task form,
+    task chat, audit log, hierarchy builder, client master, user management,
+    attendance sheet, compliance calendar, recurring templates, notification bell
+  - Security headers (CSP with unsafe-eval restricted to dev only, HSTS,
+    X-Frame-Options, Permissions-Policy)
+  - Environment variable validation at startup
+
+What remains (manual setup steps, not code):
+  - npx drizzle-kit push (apply schema to Supabase)
+  - npm run seed (with real firm name substituted)
+  - Paste rls.sql into Supabase SQL Editor
+  - Enable Realtime on task_messages, notifications, tasks
+  - Create task-files Storage bucket + RLS
+  - Create first user in Supabase Auth + profiles row
+  - Configure Resend domain + RESEND_API_KEY
+  - Set CRON_SECRET in Vercel environment variables
+  - vercel deploy + add all 8 env vars
+  - Add Vercel URL to Supabase Auth redirect URLs
+
+
+================================================================================
+SECTION 2 — TECHNOLOGY STACK (WITH VERSIONS)
+================================================================================
+
+All versions are taken directly from package.json as it exists in the codebase.
+
+Frontend Framework
+------------------
+  Next.js 16.2.9
+    Why: App Router enables React Server Components, which let data fetching
+    happen on the server with no client-side waterfall. Server Actions eliminate
+    the need for a separate REST API — mutations happen directly from form
+    submissions with full TypeScript typing end-to-end. This is a genuine
+    productivity advantage for a small team building fast.
+
+  React 19.2.4 and react-dom 19.2.4
+    Why: Required by Next.js 16. React 19 introduces the use() hook and
+    improved server/client component boundaries. The cache() function used in
+    getCurrentUser() is a React 19 primitive.
+
+  TypeScript 5.x (strict mode, zero any)
+    Why: The codebase is zero-tolerance on TypeScript `any`. Every DB query
+    returns typed rows via Drizzle's inference. Every Server Action input is
+    validated with Zod and the validated type is inferred. Type errors at
+    compile time prevent runtime errors in production.
+
+Styling
+-------
+  Tailwind CSS 4 (via @tailwindcss/postcss ^4, tailwindcss ^4)
+    Why: v4 is CSS-first — there is NO tailwind.config.js or
+    tailwind.config.ts. All customisation is done in CSS via @theme and
+    @layer. This is a deliberate architectural choice; creating a config file
+    would break v4's design system.
+
+  tw-animate-css ^1.4.0
+    CSS-only animation utilities compatible with Tailwind v4.
+
+  tailwind-merge ^3.6.0
+    Resolves conflicting Tailwind class names (e.g., when conditionally
+    applying classes in components).
+
+  class-variance-authority ^0.7.1
+    Used inside shadcn/ui components for variant-based class composition.
+
+Component Library
+-----------------
+  shadcn 4.11.0 (CLI tool)
+    Why: shadcn/ui is not a dependency — it generates component code directly
+    into src/components/ui/. This means the team owns the components and can
+    modify them. All shadcn imports must come from @/components/ui/, never
+    from any package. The base is Neutral.
+
+  @base-ui/react ^1.6.0
+    Headless accessible primitives from the Base UI team, used for lower-level
+    interactive elements where shadcn does not cover.
+
+  lucide-react ^1.21.0
+    Icon set used throughout the UI.
+
+  next-themes ^0.4.6
+    Dark/light mode provider.
+
+  sonner ^2.0.7
+    Toast notification library (client-side success/error messages).
+
+Database
+--------
+  PostgreSQL 16 via Supabase (managed, Mumbai region ap-south-1)
+    Why: Supabase provides managed Postgres with built-in Auth, Row Level
+    Security, Realtime CDC, Storage, and Edge Functions — four separate
+    services unified under one dashboard and one pricing tier. For a product
+    being built by a small team on a real firm's production data, this is the
+    correct trade-off.
+
+  Drizzle ORM ^0.45.2
+    Why: Drizzle is a TypeScript-native ORM that generates exact SQL with full
+    type inference. Unlike Prisma, it does not use a binary query engine — it
+    compiles to plain SQL strings. This matters because Supabase uses PgBouncer
+    as a connection pooler, and PgBouncer in transaction mode does not support
+    prepared statements. Drizzle's prepare:false option disables prepared
+    statements at the driver level, making it pooler-compatible.
+
+  drizzle-kit ^0.31.10 (devDependency)
+    Migration CLI. Run with DATABASE_URL_DIRECT (port 5432, bypasses pooler).
+
+  postgres ^3.4.9
+    The postgres-js driver Drizzle uses to talk to the database.
+
+Authentication
+--------------
+  @supabase/supabase-js ^2.108.2
+    Core Supabase client. Used for createAdminClient() (service role, bypasses
+    RLS) and for Realtime subscriptions.
+
+  @supabase/ssr ^0.12.0
+    Supabase's SSR package for Next.js. Manages session cookies correctly for
+    server components, middleware, and client components. The key function is
+    createServerClient() which reads cookies via Next.js cookies() API.
+
+    Critical rule: getUser() must always be used, never getSession().
+    getSession() reads from the cookie without server-side verification and can
+    be spoofed. getUser() validates the JWT with Supabase servers on every
+    call.
+
+Realtime and Notifications
+--------------------------
+  Supabase Realtime (part of @supabase/supabase-js)
+    Uses Postgres CDC (Change Data Capture) over WebSockets. TaskChat listens
+    on the task_messages table for INSERT events. The notification bell uses
+    SSE, not Realtime WebSockets, because SSE works correctly on Vercel's Edge
+    without the WebSocket limitations.
+
+    Note: The SSE endpoint runs on Node.js runtime, not Edge runtime, because
+    Supabase Realtime WebSockets are not supported on Edge.
+
+Email
+-----
+  resend ^6.14.0
+    Why: Resend has a clean TypeScript SDK, React Email integration, and
+    reliable deliverability. The daily digest sends per-user personalised emails
+    with overdue and due-soon task summaries.
+
+  @react-email/components ^1.0.12 and react-email ^6.6.3
+    React Email enables writing email templates as React components with full
+    TypeScript support. DailyDigest.tsx is the email template.
+
+Data Tables
+-----------
+  @tanstack/react-table ^8.21.3
+    Why: TanStack Table is headless — it provides sorting, filtering, and
+    pagination logic without any UI. The UI is written with Tailwind + shadcn.
+    This gives complete design control over the task list.
+
+  @tanstack/react-query ^5.101.0 and @tanstack/react-query-devtools ^5.101.0
+    Used for client-side cache management of data fetched via Server Actions.
+    QueryProvider wraps the dashboard layout.
+
+Drag and Drop
+-------------
+  @dnd-kit/core ^6.3.1
+  @dnd-kit/sortable ^10.0.0
+  @dnd-kit/utilities ^3.2.2
+    Why: @dnd-kit is the standard for accessible drag-and-drop in React 19. It
+    is used in the org hierarchy builder (OrgTree) where org admins visually
+    arrange the role tree by dragging roles into parent/child relationships.
+
+Charts
+------
+  recharts ^3.8.1
+    Why: Recharts is a React-native charting library built on D3. Used in the
+    WorkloadChart component on the accountability dashboard.
+
+Calendar
+--------
+  react-big-calendar ^1.20.0
+    Why: react-big-calendar provides a full month/week/day calendar view. Used
+    in DeadlineCalendar to display compliance deadlines and task due dates.
+
+  react-day-picker ^10.0.1
+    Date picker component used in task creation/editing forms.
+
+Forms
+-----
+  react-hook-form ^7.80.0
+    Why: Uncontrolled form management with excellent TypeScript integration.
+    Handles form state, validation errors, and submission without unnecessary
+    re-renders.
+
+  @hookform/resolvers ^5.4.0
+    Connects react-hook-form to Zod schemas for validation.
+
+  zod ^4.4.3
+    Why: Zod validates all Server Action inputs before they touch the database.
+    Every action that takes user input runs safeParse() and returns an error if
+    validation fails. This is the primary protection against malformed data.
+
+Utilities
+---------
+  date-fns ^4.4.0
+    Date manipulation (addDays, format, etc.) used in the digest cron and
+    compliance calendar.
+
+  server-only ^0.0.1
+    A tiny package that throws a build error if a server-only module is
+    accidentally imported in a client component. Used in server.ts, getUser.ts,
+    db/index.ts, and lib/cron/recurring.ts.
+
+  clsx ^2.1.1
+    Conditional className utility.
+
+Hosting
+-------
+  Vercel
+    Frontend hosting. Three cron jobs are configured in vercel.json and
+    executed by Vercel's built-in cron scheduler. Environment variables are
+    stored in Vercel's project settings.
+
+  Supabase
+    All backend services: PostgreSQL database, Auth, Realtime, Storage.
+    Region: ap-south-1 (Mumbai). Supabase manages connection pooling via
+    PgBouncer on port 6543. Direct connections (port 5432) bypass the pooler
+    and are used only for drizzle-kit migrations.
+
+
+================================================================================
+SECTION 3 — DATABASE SCHEMA
+================================================================================
+
+The schema is defined entirely in src/db/schema.ts using Drizzle ORM's
+pgTable() API. All tables have Row Level Security enabled (see Section 6).
+The connection string for app runtime is DATABASE_URL (pooler, port 6543).
+The connection string for migrations is DATABASE_URL_DIRECT (port 5432).
+
+Overview of all 11 tables:
+
+  1. orgs                — Organizations (one per CA firm)
+  2. roles               — Hierarchical role tree within an org
+  3. profiles            — User profiles (links to auth.users)
+  4. clients             — Client master (companies the CA firm serves)
+  5. tasks               — Work items
+  6. task_access         — Permission backbone (who can see/edit each task)
+  7. task_messages       — In-task chat messages
+  8. task_audit_log      — Immutable audit trail
+  9. recurring_templates — Templates for auto-generated recurring tasks
+  10. attendance_records — Staff attendance
+  11. notifications      — In-app notification inbox
+
+----------------------------------------------------------------------
+TABLE 1: orgs
+----------------------------------------------------------------------
+Purpose: Top-level tenant. Every other table scopes its data to an org.
+
+Columns:
+  id          uuid         PRIMARY KEY, defaultRandom()
+  name        text         NOT NULL             — "Sharma & Associates"
+  slug        text         NOT NULL, UNIQUE     — "sharma-associates" (URL-safe)
+  created_at  timestamptz  NOT NULL, defaultNow()
+
+Relations:
+  one org -> many roles
+  one org -> many profiles
+  one org -> many clients
+  one org -> many tasks
+  one org -> many recurring_templates
+  one org -> many attendance_records
+  one org -> many notifications
+
+Design decisions:
+  - slug is unique across the entire system for potential subdomain routing.
+  - No UPDATE or DELETE policies in RLS — orgs are permanent once created.
+    Org deactivation would be handled operationally, not programmatically.
+
+----------------------------------------------------------------------
+TABLE 2: roles
+----------------------------------------------------------------------
+Purpose: Defines the hierarchical org chart within a firm. Each role can have
+a parent role, creating a tree. Example: Founding Partner -> Partner ->
+Senior Manager -> Manager -> Article Assistant -> Intern.
+
+Columns:
+  id              uuid         PRIMARY KEY, defaultRandom()
+  org_id          uuid         NOT NULL, FK -> orgs.id
+  name            text         NOT NULL             — "Senior Manager"
+  color           text         NOT NULL, DEFAULT '#6366f1' — hex color for UI display
+  parent_role_id  uuid         NULLABLE, FK -> roles.id (self-referencing)
+  sort_order      integer      NOT NULL, DEFAULT 0  — controls display order
+  created_at      timestamptz  NOT NULL, defaultNow()
+
+Relations:
+  many roles -> one org
+  one role -> one parent role (nullable — root roles have no parent)
+  one role -> many child roles
+  one role -> many profiles
+
+Design decisions:
+  - Self-referencing FK (AnyPgColumn type import required in Drizzle to avoid
+    circular reference).
+  - sort_order enables the drag-and-drop hierarchy builder to persist ordering.
+  - The recursive CTE in src/lib/utils/hierarchy.ts traverses this tree to
+    determine who is "below" a given user for assignment permission checks.
+
+----------------------------------------------------------------------
+TABLE 3: profiles
+----------------------------------------------------------------------
+Purpose: Application-level user profile. Linked to Supabase auth.users by
+the same UUID. A user must have a profile to access the app.
+
+Columns:
+  id           uuid         PRIMARY KEY  — EQUALS auth.users.id
+  org_id       uuid         NOT NULL, FK -> orgs.id
+  role_id      uuid         NULLABLE, FK -> roles.id
+  full_name    text         NOT NULL
+  email        text         NOT NULL
+  avatar_url   text         NULLABLE
+  is_active    boolean      NOT NULL, DEFAULT true
+  is_org_admin boolean      NOT NULL, DEFAULT false
+  created_at   timestamptz  NOT NULL, defaultNow()
+
+Relations:
+  many profiles -> one org
+  many profiles -> one role (nullable)
+  one profile -> many assigned_tasks (as assignee)
+  one profile -> many created_tasks (as creator)
+  one profile -> many task_access rows
+  one profile -> many task_messages (as sender)
+  one profile -> many task_audit_log entries (as actor)
+  one profile -> many attendance_records
+  one profile -> many notifications
+
+Design decisions:
+  - No FK from profiles.id to auth.users.id is defined in Drizzle. The auth
+    schema is managed by Supabase and is outside Drizzle's scope. The
+    relationship is enforced operationally: profiles are created by an admin
+    who first creates the user in Supabase Auth, then creates the profile with
+    the matching UUID.
+  - No INSERT RLS policy. Profile creation is done exclusively via
+    createAdminClient() (service role, bypasses RLS). This is intentional —
+    only an org admin can create profiles.
+  - No DELETE RLS policy. Deactivation uses is_active = false (soft delete).
+  - UPDATE policy: users can only update their own row (id = auth.uid()).
+    Admin profile updates (e.g., granting admin status) are done via
+    createAdminClient() in server actions.
+
+----------------------------------------------------------------------
+TABLE 4: clients
+----------------------------------------------------------------------
+Purpose: The CA firm's client list. Tasks are associated with clients. The
+client master holds basic contact and tax identifier information.
+
+Columns:
+  id              uuid         PRIMARY KEY, defaultRandom()
+  org_id          uuid         NOT NULL, FK -> orgs.id
+  name            text         NOT NULL             — "Rajesh Textiles Pvt Ltd"
+  pan             text         NULLABLE             — 10-char PAN number
+  gstin           text         NULLABLE             — 15-char GSTIN
+  contact_email   text         NULLABLE
+  contact_phone   text         NULLABLE
+  is_active       boolean      NOT NULL, DEFAULT true
+  created_at      timestamptz  NOT NULL, defaultNow()
+
+Relations:
+  many clients -> one org
+  one client -> many tasks
+  one client -> many recurring_templates
+
+Design decisions:
+  - PAN and GSTIN are stored as text, not validated at DB level. Validation
+    is at the application layer via Zod regex patterns.
+  - No DELETE policy. Clients are soft-deleted via is_active = false. If a
+    client is deactivated, their historical tasks remain accessible.
+  - INSERT and UPDATE require is_org_admin = true (clients_insert_admin,
+    clients_update_admin policies).
+
+----------------------------------------------------------------------
+TABLE 5: tasks
+----------------------------------------------------------------------
+Purpose: The central entity. Every unit of work is a task. Tasks are typed
+(GST, TDS, etc.), have a status workflow, a priority, an assignee, a creator,
+and optionally a client and financial year.
+
+Columns:
+  id              uuid         PRIMARY KEY, defaultRandom()
+  org_id          uuid         NOT NULL, FK -> orgs.id
+  title           text         NOT NULL
+  description     text         NULLABLE
+  task_type       task_type    NOT NULL  — enum (see Enums below)
+  status          task_status  NOT NULL, DEFAULT 'not_started'
+  priority        task_priority NOT NULL, DEFAULT 'medium'
+  client_id       uuid         NULLABLE, FK -> clients.id
+  assignee_id     uuid         NULLABLE, FK -> profiles.id
+  creator_id      uuid         NOT NULL, FK -> profiles.id
+  financial_year  text         NULLABLE  — e.g., "2026-27"
+  due_at          timestamptz  NULLABLE
+  is_open_pool    boolean      NOT NULL, DEFAULT false
+  is_active       boolean      NOT NULL, DEFAULT true
+  created_at      timestamptz  NOT NULL, defaultNow()
+  updated_at      timestamptz  NOT NULL, defaultNow()
+
+Indexes:
+  tasks_org_id_idx    on (org_id)      — all queries filter by org first
+  tasks_assignee_id_idx on (assignee_id)  — "my tasks" queries
+  tasks_status_idx    on (status)      — status filter on task list
+  tasks_due_at_idx    on (due_at)      — overdue queries in digest cron
+
+Relations:
+  many tasks -> one org
+  many tasks -> one client (nullable)
+  many tasks -> one assignee profile (nullable)
+  many tasks -> one creator profile
+  one task -> many task_access rows
+  one task -> many task_messages
+  one task -> many task_audit_log entries
+  one task -> many notifications
+
+Enums used:
+  task_type: 'gst' | 'tds' | 'income_tax' | 'audit' | 'roc_mca' |
+             'accounting' | 'payroll' | 'notice' | 'advisory' | 'other'
+
+  task_status: 'not_started' | 'in_progress' | 'under_review' |
+               'changes_requested' | 'approved' | 'filed' | 'completed'
+
+  task_priority: 'urgent' | 'high' | 'medium' | 'low'
+
+Design decisions:
+  - is_open_pool: When a task has no assignee yet and should be visible to
+    any org member who wants to claim it, this is set to true. Open pool tasks
+    appear in the /tasks/pool page and are visible to all org members via RLS
+    (org_id = get_my_org_id() AND is_open_pool = true).
+  - financial_year: CA firms need to associate work with a specific financial
+    year (e.g., "2026-27") for reporting and organisation. This is a free text
+    field, not an enum, to accommodate edge cases.
+  - No DELETE RLS policy. Soft delete only via is_active = false.
+  - completed status is enforced as terminal in application code:
+    updateTaskStatus() returns an error if task.status === 'completed'.
+
+----------------------------------------------------------------------
+TABLE 6: task_access
+----------------------------------------------------------------------
+Purpose: The permission backbone of the task system. A user can see or
+interact with a task ONLY if they have a row in task_access for that task.
+This is the single source of truth for task visibility.
+
+Columns:
+  id            uuid         PRIMARY KEY, defaultRandom()
+  task_id       uuid         NOT NULL, FK -> tasks.id
+  user_id       uuid         NOT NULL, FK -> profiles.id
+  access_level  access_level NOT NULL  — enum: 'owner' | 'editor' | 'viewer'
+  granted_at    timestamptz  NOT NULL, defaultNow()
+
+Constraints:
+  UNIQUE (task_id, user_id)  — one access row per user per task
+
+Indexes:
+  task_access_task_id_idx on (task_id)
+  task_access_user_id_idx on (user_id)
+
+Enum: access_level: 'owner' | 'editor' | 'viewer'
+  owner  — can update task fields, reassign, grant access, soft delete
+  editor — can update status, send messages (the assigned person's level)
+  viewer — can read task and messages, can also send messages per product intent
+
+Design decisions:
+  - No RLS INSERT policy. All task_access inserts go through createAdminClient()
+    (service role). This prevents users from granting themselves access to
+    tasks they shouldn't see.
+  - No RLS DELETE or UPDATE policies either. All mutations to task_access
+    (upsert for grantTaskAccess, insert for createTask) go via admin client.
+  - The SELECT policy (task_access_select_member) uses is_task_member(task_id),
+    which avoids a recursive policy situation.
+  - When getMyTasks() runs, it first fetches all task_ids the user has in
+    task_access, then queries tasks for those IDs. This is the application-level
+    access enforcement (defence in depth on top of RLS).
+
+----------------------------------------------------------------------
+TABLE 7: task_messages
+----------------------------------------------------------------------
+Purpose: Per-task chat thread. Messages appear in the TaskChat component and
+are delivered in real-time via Supabase Realtime CDC.
+
+Columns:
+  id          uuid         PRIMARY KEY, defaultRandom()
+  task_id     uuid         NOT NULL, FK -> tasks.id
+  sender_id   uuid         NOT NULL, FK -> profiles.id
+  content     text         NULLABLE  — text content of message
+  file_url    text         NULLABLE  — URL to uploaded file (Supabase Storage)
+  file_name   text         NULLABLE  — display name of uploaded file
+  created_at  timestamptz  NOT NULL, defaultNow()
+
+Indexes:
+  task_messages_task_id_idx on (task_id)
+
+Design decisions:
+  - content and file_url are both nullable because a message can be either a
+    text message OR a file attachment (or both).
+  - RLS INSERT policy: sender_id = auth.uid() AND is_task_member(task_id)
+    A user cannot send a message pretending to be someone else.
+  - No UPDATE or DELETE policies. Messages are immutable once sent.
+
+----------------------------------------------------------------------
+TABLE 8: task_audit_log
+----------------------------------------------------------------------
+Purpose: Immutable chronological record of every significant action taken on
+every task. This is the legal and accountability backbone of the product.
+
+Columns:
+  id          uuid         PRIMARY KEY, defaultRandom()
+  task_id     uuid         NOT NULL, FK -> tasks.id
+  actor_id    uuid         NOT NULL, FK -> profiles.id
+  action      audit_action NOT NULL  — enum (see below)
+  old_value   text         NULLABLE  — previous value before the change
+  new_value   text         NULLABLE  — new value after the change
+  created_at  timestamptz  NOT NULL, defaultNow()
+
+Indexes:
+  task_audit_log_task_id_idx on (task_id)
+
+Enum: audit_action:
+  'created' | 'status_changed' | 'reassigned' | 'comment_added' |
+  'file_uploaded' | 'access_granted'
+
+Design decisions:
+  - NO INSERT RLS policy. Only createAdminClient() (service role) can insert.
+    This is non-negotiable — the audit log must be impossible to forge from
+    the application layer.
+  - NO UPDATE RLS policy. Ever. Audit log rows are permanent.
+  - NO DELETE RLS policy. Ever. Audit log rows are permanent.
+  - SELECT policy: any task member can read the audit log for their tasks.
+  - old_value and new_value capture the state before and after for status
+    changes and reassignments (e.g., old_value='not_started',
+    new_value='in_progress').
+
+----------------------------------------------------------------------
+TABLE 9: recurring_templates
+----------------------------------------------------------------------
+Purpose: Configuration for automatically generated recurring tasks. When the
+cron job fires (daily at 1 AM UTC), it checks every active template to see
+if today is its fire day, and if so, creates a new task from the template.
+
+Columns:
+  id                        uuid              PRIMARY KEY, defaultRandom()
+  org_id                    uuid              NOT NULL, FK -> orgs.id
+  title                     text              NOT NULL
+  task_type                 task_type         NOT NULL
+  cadence                   recurring_cadence NOT NULL
+  default_priority          task_priority     NOT NULL, DEFAULT 'medium'
+  default_assignee_role_id  uuid              NULLABLE, FK -> roles.id
+  default_client_id         uuid              NULLABLE, FK -> clients.id
+  days_before_due           integer           NOT NULL, DEFAULT 7
+  is_active                 boolean           NOT NULL, DEFAULT true
+  created_at                timestamptz       NOT NULL, defaultNow()
+
+Enum: recurring_cadence: 'monthly' | 'quarterly' | 'half_yearly' | 'annually'
+
+Design decisions:
+  - default_assignee_role_id assigns to a role, not a specific user. At cron
+    time, the engine finds the first active user with that role_id. This is
+    intentional — staff turnover shouldn't break templates.
+  - days_before_due: The generated task's due_at = today + days_before_due.
+    Default is 7 (give the team a week).
+  - If default_assignee_role_id is null or no user is found with that role,
+    the task is created as an open pool task (is_open_pool = true).
+  - Only org admins can INSERT or UPDATE templates (RLS policies
+    recurring_templates_insert_admin and recurring_templates_update_admin).
+
+----------------------------------------------------------------------
+TABLE 10: attendance_records
+----------------------------------------------------------------------
+Purpose: Daily attendance tracking for all staff. One record per person per
+day. Admins mark attendance; staff can view their own records.
+
+Columns:
+  id          uuid               PRIMARY KEY, defaultRandom()
+  org_id      uuid               NOT NULL, FK -> orgs.id
+  user_id     uuid               NOT NULL, FK -> profiles.id
+  date        date               NOT NULL  — 'YYYY-MM-DD' (no timezone)
+  status      attendance_status  NOT NULL
+  note        text               NULLABLE  — e.g., "Half day - medical"
+  created_at  timestamptz        NOT NULL, defaultNow()
+
+Constraints:
+  UNIQUE (user_id, date)  — one record per person per day
+
+Enum: attendance_status: 'present' | 'absent' | 'half_day' | 'leave'
+
+Design decisions:
+  - date column is type date (not timestamptz) because attendance is a
+    calendar-day concept, not a moment-in-time concept.
+  - The UNIQUE constraint on (user_id, date) enables safe upsert via
+    onConflictDoUpdate() — marking attendance twice doesn't create duplicates.
+  - RLS SELECT: a user can see their own attendance records, or all records
+    in their org if they are an admin (attendance_select_org_admin policy).
+  - INSERT and UPDATE require is_org_admin = true. Only the admin marks
+    attendance for the whole team.
+
+----------------------------------------------------------------------
+TABLE 11: notifications
+----------------------------------------------------------------------
+Purpose: In-app notification inbox. Rows are inserted by the server (admin
+client) whenever a relevant event occurs (task assigned, status changed to
+under_review, compliance deadline approaching). Delivered to the client in
+real time via SSE.
+
+Columns:
+  id          uuid         PRIMARY KEY, defaultRandom()
+  org_id      uuid         NOT NULL, FK -> orgs.id
+  user_id     uuid         NOT NULL, FK -> profiles.id
+  task_id     uuid         NULLABLE, FK -> tasks.id
+  title       text         NOT NULL
+  body        text         NULLABLE
+  is_read     boolean      NOT NULL, DEFAULT false
+  created_at  timestamptz  NOT NULL, defaultNow()
+
+Indexes:
+  notifications_user_id_idx on (user_id)
+  notifications_is_read_idx on (is_read)
+
+Design decisions:
+  - No INSERT RLS policy. All notifications are inserted via createAdminClient()
+    (service role). This ensures notifications cannot be injected by
+    client-side code.
+  - SELECT policy: user_id = auth.uid() AND org_id = get_my_org_id(). A user
+    sees only their own notifications.
+  - UPDATE policy: user_id = auth.uid(). A user can mark their own
+    notifications as read (is_read = true).
+  - task_id is nullable because some notifications (compliance deadline alerts)
+    do not relate to a specific task.
+
+
+================================================================================
+SECTION 4 — MULTI-TENANCY ARCHITECTURE
+================================================================================
+
+Filio is a multi-tenant SaaS. Multiple CA firms (orgs) share the same database.
+A breach where one org sees another org's data would be a fatal event for the
+product. The architecture uses two independent layers of isolation.
+
+Layer 1 — Application-level org_id scoping (Drizzle ORM)
+---------------------------------------------------------
+Every database query at the application layer is written with an explicit
+org_id condition. Example from tasks.ts (getMyTasks):
+
+  db.query.tasks.findMany({
+    where: (t, { and, eq, inArray }) => and(
+      inArray(t.id, taskIds),
+      eq(t.org_id, ctx.orgId),   // <-- explicit org isolation
+      eq(t.is_active, true),
+    )
+  })
+
+The orgId comes from resolveUser(), which reads the caller's profile.org_id
+from the database using the authenticated user's ID. It cannot be spoofed by
+request parameters.
+
+Layer 2 — Row Level Security (Supabase/PostgreSQL)
+--------------------------------------------------
+RLS policies are enabled on all 11 tables. Even if the application code has
+a bug and omits the org_id filter, the database will silently filter the
+rows to only those the authenticated user is permitted to see.
+
+The key helper function is get_my_org_id():
+  SELECT org_id FROM profiles WHERE id = auth.uid()
+
+This runs inside the database with SECURITY DEFINER (elevated privileges to
+read the profiles table) and is referenced by most SELECT policies.
+
+Why Drizzle ORM and RLS are both needed
+----------------------------------------
+Supabase RLS operates on the Supabase JS client (createClient()). When Drizzle
+ORM connects via postgres-js (DATABASE_URL), it connects directly to the
+database without going through the Supabase PostgREST API. This means RLS
+policies ARE enforced at the database level for all connections, including
+Drizzle. The security model is correct: RLS enforces isolation at the database
+level regardless of which client makes the query.
+
+However, Drizzle queries run as the authenticated user only if the user's JWT
+is passed to the database session via set_config('request.jwt.claims', ...).
+In the current architecture, Drizzle connects using DATABASE_URL (the pooler
+connection string), which uses a service role or session-level auth setup.
+For this reason, application-level org_id filters in Drizzle are the primary
+enforcement mechanism, and RLS on the Supabase client side provides secondary
+enforcement for any direct Supabase client calls.
+
+The admin client (createAdminClient()) uses the service role key, which bypasses
+all RLS policies. This is intentional and restricted to specific operations:
+task_access inserts, audit_log inserts, notification inserts, profile creation,
+and cron operations. Any wider use of the admin client is a security violation.
+
+DATABASE_URL vs DATABASE_URL_DIRECT
+------------------------------------
+  DATABASE_URL — pooler URL, port 6543
+    Used by the app at runtime (src/db/index.ts).
+    Routes through PgBouncer (connection pooler).
+    PgBouncer operates in transaction mode.
+    Drizzle must use prepare: false (no prepared statements) because PgBouncer
+    in transaction mode does not maintain server-side prepared statement state
+    across connections.
+    If prepare: false is omitted, the app will crash with:
+    "prepared statement already exists" after the first reuse.
+
+  DATABASE_URL_DIRECT — direct URL, port 5432
+    Used by drizzle-kit ONLY (drizzle.config.ts).
+    Bypasses PgBouncer and connects directly to Postgres.
+    Required for migrations because drizzle-kit uses prepared statements
+    internally during schema introspection.
+    Never use this URL in the app runtime code.
+
+
+================================================================================
+SECTION 5 — AUTHENTICATION FLOW
+================================================================================
+
+Step-by-Step Authentication Flow
+---------------------------------
+
+1. User visits /login
+   The login page is in src/app/(auth)/login/page.tsx.
+   It renders an email+password form (and optionally a magic link option).
+
+2. signInAndVerifyProfile() is called on form submission
+   This function is in src/lib/auth/signIn.ts.
+   It calls supabase.auth.signInWithPassword({ email, password }).
+   If sign-in succeeds, it immediately checks whether a profile exists for
+   the authenticated user's ID in the profiles table.
+   If no profile exists (user exists in auth.users but was never given a
+   profile row), it calls supabase.auth.signOut() and redirects to
+   /login?error=no_profile.
+   Why: It is possible to create an auth.users row in Supabase without creating
+   a profiles row. Without this check, the user would be authenticated but every
+   subsequent profile lookup (resolveUser()) would fail, causing confusing errors
+   in every server action.
+
+3. Supabase Auth issues a session
+   On successful sign-in, Supabase sets HTTP-only cookies containing the access
+   token (JWT) and refresh token. The @supabase/ssr library manages these cookies
+   in a way that is compatible with Next.js server components, middleware, and
+   client components.
+
+4. Middleware fires on every request (src/proxy.ts)
+   The proxy() function is exported from src/proxy.ts and called by
+   src/middleware.ts for every request matching the matcher pattern.
+   It uses createServerClient() from @supabase/ssr with cookies from the
+   request. It calls supabase.auth.getUser() (NOT getSession()).
+
+   Critical: Why getUser() not getSession()?
+   getSession() reads the JWT from the cookie and returns it without verifying
+   it with Supabase's servers. An attacker who can forge or steal a session
+   cookie could pass a fake JWT. getUser() sends the JWT to Supabase's auth
+   server for verification on every request, which is slower but secure.
+   The CLAUDE.md explicitly prohibits getSession() in middleware.
+
+5. Route protection logic in proxy.ts
+   isAuthPage = (pathname === '/login' || pathname === '/auth/callback')
+   isProtected = (pathname.startsWith('/dashboard') || pathname === '/')
+
+   If !user && isProtected: redirect to /login (preserve cookies)
+   If user && isAuthPage: redirect to /dashboard (already authenticated)
+   /auth/logout is NOT in isAuthPage — it is excluded intentionally so a
+   POST to /auth/logout is never mistakenly blocked.
+
+6. getCurrentUser() in Server Components
+   src/lib/auth/getUser.ts exports getCurrentUser, wrapped in React's cache().
+   cache() deduplicates calls within a single request — if five Server
+   Components in the same render tree all call getCurrentUser(), only one
+   Supabase.auth.getUser() network call is made. The result is shared.
+
+   getCurrentUser returns: { id: string; email: string } | null
+
+   The id is the auth.users UUID, which equals profiles.id.
+
+7. Protected routes — resolveUser() in Server Actions
+   Every server action that needs auth calls resolveUser() (defined in
+   src/actions/tasks.ts). This function:
+   a. Calls getCurrentUser() (cached, no extra network call)
+   b. Queries the profiles table for the user's org_id
+   c. Returns { userId, orgId } or { error: 'Unauthorized' }
+
+   Every action begins with:
+     const ctx = await resolveUser();
+     if (isErrorResult(ctx)) return ctx;
+
+8. Logout flow
+   POST /auth/logout (src/app/(auth)/auth/logout/route.ts)
+   Calls supabase.auth.signOut(), which clears the session cookies.
+   Redirects to /login.
+   This route is excluded from the isAuthPage check in middleware to
+   prevent redirect loops.
+
+Session Refresh
+---------------
+The middleware calls supabase.auth.getUser() which also refreshes the session
+if the access token is about to expire. The setAll() cookie callback in
+proxy.ts ensures the refreshed tokens are written back to the response cookies.
+This is the standard @supabase/ssr pattern for Next.js 15.
+
+
+================================================================================
+SECTION 6 — ROW LEVEL SECURITY
+================================================================================
+
+All policies are defined in src/db/rls.sql. The file is idempotent — it
+uses DROP POLICY IF EXISTS before every CREATE POLICY, so it can be re-run
+safely.
+
+RLS is enabled on all 11 tables:
+  ALTER TABLE public.<table> ENABLE ROW LEVEL SECURITY;
+
+----------------------------------------------------------------------
+HELPER FUNCTIONS (SECURITY DEFINER SET search_path = public)
+----------------------------------------------------------------------
+
+These functions are defined with SECURITY DEFINER and SET search_path = public.
+SECURITY DEFINER means they execute with the privileges of the function creator
+(the database superuser), not the caller. SET search_path = public prevents
+search path injection attacks.
+
+1. get_my_org_id() RETURNS uuid
+   SELECT org_id FROM public.profiles WHERE id = auth.uid()
+   Called by: almost every RLS SELECT policy.
+   Purpose: Returns the org_id of the current authenticated user.
+
+2. is_org_admin() RETURNS boolean
+   SELECT COALESCE((SELECT is_org_admin FROM public.profiles WHERE id = auth.uid()), false)
+   Called by: admin-only table policies (roles, clients, recurring_templates,
+   attendance_records).
+   COALESCE ensures false is returned even if the profile row doesn't exist.
+
+3. is_task_member(p_task_id uuid) RETURNS boolean
+   SELECT EXISTS (SELECT 1 FROM public.task_access
+                  WHERE task_id = p_task_id AND user_id = auth.uid())
+   Called by: tasks SELECT, task_messages SELECT, task_audit_log SELECT,
+   task_access SELECT policies.
+   Purpose: Avoids recursive policy problem. If task SELECT policy called
+   itself to check task_access, and task_access policy called tasks, infinite
+   recursion would occur. Using a SECURITY DEFINER function breaks the cycle.
+
+4. is_task_owner(p_task_id uuid, p_user_id uuid) RETURNS boolean
+   SELECT EXISTS (SELECT 1 FROM public.task_access
+                  WHERE task_id = p_task_id AND user_id = p_user_id
+                  AND access_level = 'owner')
+   Called by: Used in application layer; available for future RLS policies.
+   Purpose: Checks if a specific user is the task owner.
+
+----------------------------------------------------------------------
+RLS POLICIES PER TABLE
+----------------------------------------------------------------------
+
+orgs:
+  SELECT "orgs_select_own": id = get_my_org_id()
+    Users can only see their own org row.
+  (No INSERT/UPDATE/DELETE — orgs are created operationally)
+
+roles:
+  SELECT "roles_select_org": org_id = get_my_org_id()
+  INSERT "roles_insert_admin": org_id = get_my_org_id() AND is_org_admin()
+  UPDATE "roles_update_admin": org_id = get_my_org_id() AND is_org_admin()
+  DELETE "roles_delete_admin": org_id = get_my_org_id() AND is_org_admin()
+
+profiles:
+  SELECT "profiles_select_org": org_id = get_my_org_id()
+    All org members can see each other's profiles (needed for assignee dropdowns)
+  UPDATE "profiles_update_own": id = auth.uid()
+    Users can only update their own profile.
+  (No INSERT policy — admin client creates profiles via service role)
+  (No DELETE policy — soft delete only via is_active = false)
+
+clients:
+  SELECT "clients_select_org": org_id = get_my_org_id()
+  INSERT "clients_insert_admin": org_id = get_my_org_id() AND is_org_admin()
+  UPDATE "clients_update_admin": org_id = get_my_org_id() AND is_org_admin()
+  (No DELETE policy — soft delete only)
+
+tasks:
+  SELECT "tasks_select_member":
+    org_id = get_my_org_id() AND (is_open_pool = true OR is_task_member(id))
+    Open pool tasks visible to all org members. Private tasks visible only to
+    task members.
+  INSERT "tasks_insert_org": org_id = get_my_org_id()
+    Any org member can create a task.
+  UPDATE "tasks_update_member":
+    org_id = get_my_org_id() AND is_task_member(id)
+    Only task members can update the task row.
+  (No DELETE policy — soft delete only)
+
+task_access:
+  SELECT "task_access_select_member": is_task_member(task_id)
+    Task members can see the full access list.
+  (No INSERT, UPDATE, DELETE policies — admin client only)
+
+task_messages:
+  SELECT "task_messages_select_member": is_task_member(task_id)
+  INSERT "task_messages_insert_member":
+    is_task_member(task_id) AND sender_id = auth.uid()
+    Enforces sender_id cannot be faked.
+
+task_audit_log:
+  SELECT "task_audit_log_select_member": is_task_member(task_id)
+  (NO INSERT, UPDATE, DELETE policies — ever)
+  Inserts are exclusively via createAdminClient() (service role).
+
+recurring_templates:
+  SELECT "recurring_templates_select_org": org_id = get_my_org_id()
+  INSERT "recurring_templates_insert_admin":
+    org_id = get_my_org_id() AND is_org_admin()
+  UPDATE "recurring_templates_update_admin":
+    org_id = get_my_org_id() AND is_org_admin()
+
+attendance_records:
+  SELECT "attendance_select_org_admin":
+    org_id = get_my_org_id() AND (user_id = auth.uid() OR is_org_admin())
+    Staff see their own records. Admins see everyone's.
+  INSERT "attendance_insert_admin":
+    org_id = get_my_org_id() AND is_org_admin()
+  UPDATE "attendance_update_admin":
+    org_id = get_my_org_id() AND is_org_admin()
+
+notifications:
+  SELECT "notifications_select_own":
+    user_id = auth.uid() AND org_id = get_my_org_id()
+  UPDATE "notifications_update_own": user_id = auth.uid()
+    (For marking is_read = true)
+  (No INSERT policy — admin client creates notifications)
+
+----------------------------------------------------------------------
+Why task_audit_log has SELECT only
+----------------------------------------------------------------------
+The audit log is a legal and accountability record. A founding partner must be
+able to present it as evidence of who did what and when. If users could insert
+their own audit log rows, they could fabricate a history. If they could update
+or delete rows, they could erase one. The only permitted operation at the user
+level is reading. All inserts happen via the service role (createAdminClient())
+inside server actions after the action has already been committed.
+
+----------------------------------------------------------------------
+Why profiles has no INSERT RLS policy
+----------------------------------------------------------------------
+Profile creation requires a human decision: the org admin decides who joins the
+firm. The flow is: create the user in Supabase Auth dashboard, copy their UUID,
+create the profile row via admin tools or a privileged server action. There is
+no self-registration. Therefore no user-facing INSERT path exists, and the RLS
+INSERT policy is intentionally omitted.
+
+----------------------------------------------------------------------
+Why WITH CHECK (true) is absolutely prohibited
+----------------------------------------------------------------------
+WITH CHECK (true) would allow any authenticated user to insert any row into a
+table, regardless of its org_id. A malicious user could insert a task into
+another org, or a notification into another user's inbox. This is a critical
+vulnerability and is explicitly prohibited in CLAUDE.md rule #4.
+
+
+================================================================================
+SECTION 7 — TASK ENGINE
+================================================================================
+
+Task Types (the 10 CA work categories)
+---------------------------------------
+  gst         — GST filings, GSTR-1, GSTR-3B, annual return
+  tds         — TDS deductions, deposits, quarterly returns, Form 16
+  income_tax  — ITR filing, tax audit reports, advance tax
+  audit       — Statutory audit, internal audit, tax audit
+  roc_mca     — ROC filings, AOC-4, MGT-7, Form 11, DIR-3 KYC
+  accounting  — Bookkeeping, bank reconciliation, ledger maintenance
+  payroll     — Salary processing, PF/ESI deposits and returns
+  notice      — Responses to tax notices (GST, IT, TDS)
+  advisory    — Client advisory, planning, opinion letters
+  other       — Anything not covered above
+
+Status Workflow
+---------------
+The workflow enforces a linear progression with one allowed backward step.
+
+  not_started
+      |
+      v
+  in_progress
+      |
+      v
+  under_review
+      |
+      +---> changes_requested
+      |              |
+      |              v
+      |          in_progress (loop back)
+      |
+      v
+  approved
+      |
+      v
+  filed
+      |
+      v
+  completed  <-- TERMINAL STATE (immutable)
+
+STATUS_TRANSITIONS map (from src/lib/validations/task.ts):
+  not_started      -> ['in_progress']
+  in_progress      -> ['under_review']
+  under_review     -> ['changes_requested', 'approved']
+  changes_requested -> ['in_progress']
+  approved         -> ['filed']
+  filed            -> ['completed']
+  completed        -> []  (empty — no transitions allowed)
+
+The transition check in updateTaskStatus():
+  const allowed = STATUS_TRANSITIONS[task.status] ?? [];
+  if (!allowed.includes(new_status)) return { error: ... }
+
+Completed tasks are immutable:
+  if (task.status === 'completed') return { error: 'Completed tasks are immutable' }
+  This check runs BEFORE the transition check.
+
+Task Access Model
+-----------------
+The task_access table is the single permission source. When a task is created:
+  1. The creator gets access_level = 'owner'
+  2. If there is an assignee (and they are not the creator), they get
+     access_level = 'editor'
+
+These rows are inserted via createAdminClient() — no RLS INSERT policy exists
+on task_access.
+
+Access levels and what they permit:
+  owner  — update task fields (title, description, priority, due_at, assignee),
+            grant access to others, soft delete the task
+  editor — update task status (within allowed transitions), send messages
+  viewer — read the task and its messages, send messages
+
+How createTask() works (complete flow)
+---------------------------------------
+1. getCurrentUser() -> resolveUser() extracts { userId, orgId }
+2. Zod validates the input against createTaskSchema
+3. If client_id provided, verify it belongs to same org (AND is_active)
+4. If assignee_id provided, verify they belong to same org (AND is_active)
+5. db.insert(tasks).values({ ...data, org_id: ctx.orgId, creator_id: ctx.userId })
+   This uses the Drizzle client (DATABASE_URL/pooler). RLS tasks_insert_org
+   policy enforces org_id = get_my_org_id() at the database level too.
+6. const admin = createAdminClient()
+   admin.from('task_access').insert([
+     { task_id, user_id: ctx.userId, access_level: 'owner' },
+     { task_id, user_id: assignee_id, access_level: 'editor' }  // if different from creator
+   ])
+7. insertAuditLog({ task_id, actor_id: ctx.userId, action: 'created', new_value: task.title })
+   -> admin.from('task_audit_log').insert(...)
+8. insertNotification({ org_id, user_id: assignee_id, task_id, title: 'New task assigned' })
+   -> admin.from('notifications').insert(...)
+   (only if assignee is different from creator)
+
+Role Hierarchy Enforcement for Assignment
+------------------------------------------
+The architectural design specifies that a user should only be able to assign
+tasks to people below them in the hierarchy. This is enforced via the
+getUserSubtree() CTE utility in src/lib/utils/hierarchy.ts, which uses a
+recursive CTE to traverse the roles tree and return all role_ids under a given
+role. The assignee dropdown in the UI is filtered to only show users within
+the caller's subtree.
+
+Open Pool Tasks
+---------------
+When is_open_pool = true, the task is visible to ALL org members via the RLS
+tasks_select_member policy (is_open_pool = true bypasses the is_task_member
+check). Any org member can view open pool tasks at /tasks/pool.
+
+claimPoolTask() server action:
+1. Verifies the task is in the same org and is_open_pool = true
+2. Sets assignee_id = ctx.userId and is_open_pool = false
+3. Inserts a task_access row for the claimer (if not already present) via admin client
+4. Inserts an audit log entry (action: 'reassigned')
+
+
+================================================================================
+SECTION 8 — RECURRING TASK ENGINE
+================================================================================
+
+Purpose
+-------
+CA firms have a predictable, repetitive filing calendar. Every month, GSTR-3B
+must be filed. Every quarter, TDS returns. Every year, Income Tax returns. The
+recurring engine auto-generates tasks from templates so the partner doesn't
+have to manually create these every period.
+
+recurring_templates table
+--------------------------
+See Section 3, Table 9 for full column details.
+
+Key fields:
+  cadence                  — when to fire: monthly, quarterly, half_yearly, annually
+  default_assignee_role_id — which role should receive the task (looks up a user)
+  days_before_due          — generated task's due date = today + days_before_due
+  is_active                — template can be paused without deletion
+
+shouldFireToday() logic (src/lib/cron/recurring.ts)
+------------------------------------------------------
+The cron runs daily at 1 AM UTC. shouldFireToday() determines if today is the
+right day to fire a template based on its cadence:
+
+  if (day !== 1) return false;  // All recurring tasks fire on the 1st of the month
+
+  switch (cadence) {
+    case 'monthly':    return true;                       // every 1st
+    case 'quarterly':  return [0,3,6,9].includes(month); // Jan, Apr, Jul, Oct (0-indexed)
+    case 'half_yearly': return [3,9].includes(month);    // Apr, Oct
+    case 'annually':   return month === 3;               // April (start of Indian FY)
+  }
+
+How generateTasksFromTemplates() works
+----------------------------------------
+Source: src/lib/cron/recurring.ts
+
+1. Fetch all active recurring_templates from the database
+2. If orgId parameter provided, filter to that org only
+3. For each template:
+   a. Check shouldFireToday(template.cadence, now) — skip if false
+   b. Look up the org admin profile (is_org_admin = true, is_active = true)
+      This becomes the creator_id of the generated task. Skip if no admin found.
+   c. If default_assignee_role_id exists, look up the first active user with
+      that role. If not found, task will be open pool.
+   d. Calculate dueDate = addDays(now, template.days_before_due), set time to 23:59:59
+   e. admin.from('tasks').insert({ ... is_open_pool: assigneeId === null })
+   f. admin.from('task_access').insert(accessRows) — owner for admin, editor for assignee
+   g. admin.from('task_audit_log').insert({ action: 'created', new_value: '[recurring] title' })
+   h. admin.from('notifications').insert({ user_id: assigneeId, title: 'New task assigned' })
+
+Why this lives in src/lib/cron/ not src/actions/
+--------------------------------------------------
+Server Actions (files with 'use server') are exposed as RPC endpoints callable
+from the client. If generateTasksFromTemplates() were a server action, a
+malicious client could call it directly and trigger mass task creation. By
+placing it in src/lib/cron/recurring.ts (with 'server-only' import at the top),
+it is guaranteed to never be exported as a client-callable action. The cron
+endpoint (/api/cron/recurring/route.ts) is a Route Handler, not a Server Action,
+and is protected by CRON_SECRET Bearer token authentication.
+
+All task and task_access operations in the recurring engine use createAdminClient()
+because:
+1. There is no authenticated user session in a cron job
+2. task_access has no RLS INSERT policy
+3. task_audit_log has no RLS INSERT policy
+
+
+================================================================================
+SECTION 9 — REALTIME AND NOTIFICATIONS
+================================================================================
+
+Two separate systems deliver live updates:
+1. Supabase Realtime (WebSockets) for task chat
+2. Supabase Realtime (WebSockets) for the notification bell (browser-side)
+
+----------------------------------------------------------------------
+TaskChat — Supabase Realtime CDC
+----------------------------------------------------------------------
+Source: src/components/tasks/TaskChat.tsx
+
+The TaskChat component subscribes to Postgres CDC on the task_messages table
+for a specific task_id.
+
+Subscribe pattern:
+  const channel = supabase
+    .channel(`task-chat-${taskId}`)
+    .on('postgres_changes', {
+      event: 'INSERT',
+      schema: 'public',
+      table: 'task_messages',
+      filter: `task_id=eq.${taskId}`,
+    }, (payload) => {
+      // payload.new is the new message row
+      setMessages(prev => [...prev, payload.new])
+    })
+    .subscribe((status, err) => {
+      if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+        console.error('[TaskChat] Realtime error', { status, err });
+      }
+    })
+
+Channel lifecycle:
+  subscribe() on component mount
+  supabase.removeChannel(channel) on component unmount (useEffect cleanup)
+
+On mount, the component calls getTaskMessages() (server action) to load
+the existing message history. New messages arrive via the Realtime subscription
+without any polling.
+
+Prerequisites: Realtime must be enabled for the task_messages table in
+Supabase dashboard (Database -> Replication -> Enable for task_messages).
+
+----------------------------------------------------------------------
+NotificationBell — Supabase Realtime (browser-side)
+----------------------------------------------------------------------
+Source: src/components/layout/NotificationBell.tsx
+Endpoint: src/app/api/notifications/stream/route.ts (plain JSON GET, not SSE)
+
+Architecture decision — why NOT SSE on Vercel:
+An earlier design used SSE with a 30-second heartbeat to keep the connection
+alive. This was abandoned because Vercel serverless functions have a 10-second
+default timeout (or 300 seconds on Pro for route handlers, but the connection
+itself would be terminated unpredictably). Supabase Realtime WebSockets work
+correctly in the browser client (createBrowserClient). The simplest correct
+solution is to open the Realtime subscription directly in the browser component
+— no Route Handler needed as the long-lived connection host.
+
+NotificationBell implementation:
+  const supabase = createBrowserClient(...)
+  supabase
+    .channel(`notifications-${userId}`)
+    .on('postgres_changes', {
+      event: 'INSERT',
+      schema: 'public',
+      table: 'notifications',
+      filter: `user_id=eq.${userId}`,
+    }, (payload) => {
+      setUnreadCount(c => c + 1)
+      setNotifications(prev => [payload.new, ...prev])
+    })
+    .subscribe((status, err) => {
+      if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+        console.error('[NotificationBell] Realtime error', { status, err });
+      }
+    })
+
+On mount, the component calls a server action (getNotifications) to load
+the initial list of unread notifications.
+
+/api/notifications/stream/route.ts:
+  Simplified to a plain GET endpoint that returns the user's recent
+  notifications as JSON. Used for initial load fallback only; not SSE.
+
+Prerequisites: Realtime must be enabled for the notifications table in
+Supabase dashboard (Database -> Replication -> Enable for notifications).
+
+
+================================================================================
+SECTION 10 — COMPLIANCE CALENDAR
+================================================================================
+
+Source: src/lib/compliance/deadlines.ts
+
+Purpose
+-------
+Indian CA firms must track dozens of statutory filing deadlines across multiple
+regulators (GST portal, TRACES for TDS, Income Tax portal, MCA portal, EPFO
+portal). The compliance calendar for FY 2026-27 (April 2026 to March 2027) is
+hardcoded and auto-generates notifications when deadlines approach.
+
+Categories
+----------
+  gst          — GST filings
+  tds          — TDS deposits and returns
+  income_tax   — ITR filings, tax audit reports
+  roc          — ROC/MCA company filings
+  advance_tax  — Quarterly advance tax installments
+  payroll      — PF and ESI deposits and returns
+
+All Deadlines Covered in FY 2026-27
+--------------------------------------
+
+GST (monthly, all 12 months of FY 2026-27):
+  GSTR-1 Filing         — 11th of every following month (outward supplies)
+  GSTR-3B Filing        — 20th of every following month (summary + payment) [URGENT]
+  GSTR-2B Reconciliation — 14th of every following month (advisory, ITC check)
+  GSTR-9 Annual Return  — 30 September 2027 (annual summary for FY 2026-27)
+
+TDS (monthly deposits):
+  TDS Deposit          — 7th of following month (all months except March)
+  TDS Deposit (March)  — 30 April 2027 (special extended deadline for March)
+
+TDS (quarterly returns):
+  Q1 (Apr-Jun 2026)    — 31 July 2026
+  Q2 (Jul-Sep 2026)    — 31 October 2026
+  Q3 (Oct-Dec 2026)    — 31 January 2027
+  Q4 (Jan-Mar 2027)    — 31 May 2027
+  Form 16 Issue        — 15 June 2027
+
+Advance Tax (quarterly installments, FY 2026-27):
+  1st Installment (15%) — 15 June 2026
+  2nd Installment (45%) — 15 September 2026
+  3rd Installment (75%) — 15 December 2026 [URGENT]
+  4th Installment (100%)— 15 March 2027 [URGENT]
+
+Income Tax:
+  ITR — Individuals, Non-Audit Cases    — 31 July 2026 [URGENT]
+  Tax Audit Report (Form 3CA/3CB/3CD)   — 30 September 2026 [URGENT]
+  ITR — Audit Cases (non-corporate)     — 31 October 2026 [URGENT]
+  ITR — Companies                       — 30 November 2026 [URGENT]
+  Revised/Belated ITR                   — 31 December 2026
+
+ROC/MCA:
+  Form 11 — LLP Annual Return           — 30 May 2026
+  DIR-3 KYC — Director KYC             — 30 September 2026
+  AOC-4 — Annual Accounts Filing        — 29 October 2026
+  Form 8 — LLP Statement of Accounts   — 30 October 2026
+  MGT-7/MGT-7A — Annual Return          — 28 November 2026
+
+Payroll (monthly, all 12 months):
+  PF Deposit  — 15th of same month
+  ESI Deposit — 15th of same month
+  PF ECR Return — 25th of same month
+
+Helper Functions Exported
+--------------------------
+  getUpcomingDeadlines(days: number): ComplianceDeadline[]
+    Returns deadlines from today up to today+days (inclusive).
+    Used by the compliance cron to find deadlines within 7 days.
+
+  getDeadlinesForMonth(year: number, month: number): ComplianceDeadline[]
+    Returns all deadlines for a given calendar month.
+    Used by the calendar view (react-big-calendar).
+
+ComplianceDeadline type:
+  id            — unique string identifier (e.g., 'gstr3b-april-2026')
+  title         — human-readable title
+  description   — detailed description of what to do
+  category      — 'gst' | 'tds' | 'income_tax' | 'roc' | 'advance_tax' | 'payroll' | 'other'
+  due_date      — 'YYYY-MM-DD' string
+  applicable_to — who this applies to
+  period        — the reporting period (e.g., 'April 2026')
+  task_type     — maps to the tasks.task_type enum
+  priority      — 'urgent' | 'high' | 'medium' | 'low'
+
+Compliance Cron (/api/cron/compliance)
+----------------------------------------
+Schedule: 0 8 * * * (daily at 8:00 AM UTC)
+Logic:
+  1. Calls getUpcomingDeadlines(7) to find deadlines in the next 7 days
+  2. For each deadline, finds all org admins across all orgs
+  3. Inserts a notification for each admin via createAdminClient()
+  4. Deduplication: checks for existing notification with the same title and
+     user_id created today before inserting (prevents duplicate alerts if
+     the cron runs multiple times)
+
+
+================================================================================
+SECTION 11 — ATTENDANCE MANAGEMENT
+================================================================================
+
+Source: src/actions/attendance.ts
+
+Design
+------
+Attendance is a secondary feature supporting the founding partner's need to
+know who is in the office. It is admin-only for marking; staff can view their
+own records.
+
+The resolveAdmin() guard at the top of attendance.ts checks:
+  1. getCurrentUser() — must be authenticated
+  2. profiles.is_org_admin === true — must be org admin
+  3. Returns { orgId } or { error: 'Forbidden: org admin only' }
+
+All four functions in attendance.ts begin with resolveAdmin() and return an
+error immediately if the caller is not an admin.
+
+Available Server Actions
+------------------------
+
+  getAttendanceForDate(date: string)
+    Returns all active org members with their attendance record for a given date.
+    Profiles are sorted by role.sort_order (ascending), then alphabetically by name.
+    Uses a single SQL query to get all records for the date, then builds a Map
+    for O(1) lookup when joining to profiles.
+
+  markAttendance(input: { user_id, date, status, note? })
+    Upserts a single attendance record.
+    Conflict target: (user_id, date) — the unique constraint.
+    Validates: date in YYYY-MM-DD format, status is a valid enum value,
+    target user belongs to the admin's org.
+    Uses onConflictDoUpdate() to update status and note if a record exists.
+
+  bulkMarkAttendance(input: { date, records: [{ user_id, status }] })
+    Upserts attendance for multiple staff on a single date.
+    Validates all user_ids in a single query (avoids N+1 validation queries).
+    Rejects the entire batch if any user_id doesn't belong to the org.
+
+  getMonthlyAttendanceSummary(year: number, month: number)
+    Returns per-staff attendance counts for a calendar month.
+    Aggregated in application code (not SQL aggregation) for flexibility.
+    All active profiles appear even if they have zero records for the month.
+    Returns: { profile, present, absent, half_day, leave, total_days }
+
+Attendance Status Values
+------------------------
+  present   — full working day
+  absent    — not present (non-leave absence)
+  half_day  — worked half the day
+  leave     — pre-approved leave (PL, SL, etc.)
+
+
+================================================================================
+SECTION 12 — EMAIL DIGEST
+================================================================================
+
+Source: src/app/api/cron/digest/route.ts
+Template: src/emails/DailyDigest.tsx
+
+Purpose
+-------
+Every weekday morning (Mon-Sat), each user with actionable tasks receives a
+personalised email showing:
+  - Tasks that are overdue (due_at < now, status not completed)
+  - Tasks due soon (due_at between now and now+7 days, status not completed)
+
+Schedule: 0 7 * * 1-6 (7:00 AM UTC, Monday through Saturday)
+
+Email Flow
+----------
+1. CRON_SECRET Bearer token check — returns 401 if missing or wrong
+2. Fetch all active profiles from all orgs (digest is org-agnostic at the
+   query level; data isolation happens via task_access rows which are already
+   org-scoped)
+3. For each user:
+   a. Fetch their task_access rows to get the set of task_ids they can see
+   b. Skip if no task_access rows
+   c. Query overdue tasks: inArray(id, taskIds) AND is_active AND due_at < now
+   d. Query due-soon tasks: inArray(id, taskIds) AND is_active AND due_at BETWEEN now AND now+7days
+   e. Filter out completed tasks from both lists (completed tasks are not actionable)
+   f. Skip user if both lists are empty
+   g. Call resend.emails.send() with DailyDigest React component as the body
+4. Return { success: true, emailsSent: count, failed: [emails] }
+
+Per-user error handling: if one user's email fails, the loop continues with
+the next user. Errors are collected and returned in the response.
+
+Email Template (DailyDigest.tsx)
+----------------------------------
+Accepts:
+  userName    — recipient's full name
+  appUrl      — base URL for task links (NEXT_PUBLIC_APP_URL)
+  overdueItems — [{ id, title, clientName, daysOverdue }]
+  dueSoonItems — [{ id, title, clientName, dueDate }]
+
+Sender: Filio <digest@filio.app>
+Subject: Daily Digest — {N} overdue, {M} due soon
+
+From address in the code: 'Filio <digest@filio.app>'
+This must match a verified Resend domain. For testing, use
+'onboarding@resend.dev' if the domain is not yet verified.
+
+
+================================================================================
+SECTION 13 — CRON JOBS
+================================================================================
+
+Defined in vercel.json. Vercel's cron scheduler calls these endpoints with an
+Authorization: Bearer ${CRON_SECRET} header. All three endpoints verify this
+header and return 401 if it is missing or incorrect.
+
+----------------------------------------------------------------------
+Cron 1: /api/cron/recurring
+Schedule: 0 1 * * * (1:00 AM UTC, every day)
+----------------------------------------------------------------------
+Source: src/app/api/cron/recurring/route.ts (Route Handler, GET method)
+Logic module: src/lib/cron/recurring.ts (generateTasksFromTemplates)
+export const maxDuration = 300; (Vercel Pro — 5 minutes)
+
+What it does:
+  Calls generateTasksFromTemplates() with no orgId filter (processes all orgs).
+  For each active recurring_template, checks shouldFireToday() for today.
+  If today is a fire day, creates a task, task_access rows, an audit log entry,
+  and a notification for the assignee. Includes orphan rollback: if task_access
+  insert fails, the newly created task row is immediately deleted.
+  Returns { success: true, created: N }.
+  Logs structured JSON: { level, cron, event, duration_ms, created } on complete.
+  Pings HC_PING_RECURRING_URL (Healthchecks.io) on success if env var present.
+
+Running on day 1 of every month means:
+  - monthly templates fire every 1st
+  - quarterly templates fire Jan 1, Apr 1, Jul 1, Oct 1
+  - half_yearly templates fire Apr 1, Oct 1 (corrected: Jan/Feb/Mar → Mar 31)
+  - annually templates fire Apr 1 (start of Indian financial year)
+
+----------------------------------------------------------------------
+Cron 2: /api/cron/digest
+Schedule: 0 7 * * 1-6 (7:00 AM UTC, Monday to Saturday)
+----------------------------------------------------------------------
+Source: src/app/api/cron/digest/route.ts (Route Handler, GET method)
+export const maxDuration = 300; (Vercel Pro — 5 minutes)
+
+What it does: See Section 12 (Email Digest) for full details.
+Logs structured JSON on start and complete.
+Pings HC_PING_DIGEST_URL on success if env var present.
+
+Why Monday to Saturday (not Sunday)?
+CA firms in India typically work Monday to Saturday. Sunday emails serve no
+purpose as no work is being reviewed.
+
+----------------------------------------------------------------------
+Cron 3: /api/cron/compliance
+Schedule: 0 8 * * * (8:00 AM UTC, every day)
+----------------------------------------------------------------------
+Source: src/app/api/cron/compliance/route.ts (Route Handler, GET method)
+export const maxDuration = 300; (Vercel Pro — 5 minutes)
+
+What it does:
+  1. Calls getUpcomingDeadlines(7) to find statutory deadlines in the next 7 days
+  2. Fetches all org admins (is_org_admin = true AND is_active = true) across all orgs
+  3. For each deadline, for each admin: checks if a notification with the same
+     title was already sent today (deduplication query on notifications table)
+  4. If not duplicate: inserts a notification via createAdminClient()
+  Returns { success: true, notificationsSent: N }.
+  Logs structured JSON on start and complete.
+  Pings HC_PING_COMPLIANCE_URL on success if env var present.
+
+CRON_SECRET Protection
+----------------------
+All three endpoints check:
+  const authHeader = request.headers.get('Authorization')
+  if (!process.env.CRON_SECRET || authHeader !== `Bearer ${process.env.CRON_SECRET}`)
+    return 401
+
+Vercel automatically sends this header when it calls cron endpoints from
+vercel.json configuration.
+
+Why GET, not POST?
+------------------
+Vercel's cron scheduler sends GET requests to configured endpoints. An earlier
+version of all three handlers exported POST, which meant Vercel received a 405
+Method Not Allowed on every cron fire. Fixed by renaming to GET.
+
+
+================================================================================
+SECTION 14 — ENVIRONMENT VARIABLES
+================================================================================
+
+All env vars live in .env.local for development. All must be added to Vercel
+project settings for production (each var must be added individually).
+
+----------------------------------------------------------------------
+NEXT_PUBLIC_SUPABASE_URL
+----------------------------------------------------------------------
+Type: Public (exposed to browser)
+Format: https://<project-ref>.supabase.co
+Used in: src/lib/supabase/client.ts, src/lib/supabase/server.ts, src/proxy.ts
+Purpose: The base URL for all Supabase API calls (Auth, Realtime, Storage,
+PostgREST). This is safe to expose publicly — it identifies your project but
+doesn't grant access.
+
+----------------------------------------------------------------------
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+----------------------------------------------------------------------
+Type: Public (exposed to browser)
+Format: sb_publishable_... (new 2026 format, NOT the old anon key format)
+Note: This is NOT the same as the SUPABASE_ANON_KEY you may have seen in
+older documentation. Supabase renamed this in early 2026 to sb_publishable_.
+Used in: src/lib/supabase/client.ts, src/lib/supabase/server.ts, src/proxy.ts
+Purpose: Identifies the client application to Supabase. Paired with RLS
+policies to restrict what authenticated users can do. This key is safe to
+expose — it cannot bypass RLS.
+
+----------------------------------------------------------------------
+SUPABASE_SECRET_KEY
+----------------------------------------------------------------------
+Type: Server-only (NEVER expose to browser, NEVER in NEXT_PUBLIC_ prefix)
+Format: service_role JWT from Supabase dashboard
+Used in: src/lib/supabase/server.ts (createAdminClient() only)
+Purpose: Service role key that bypasses all RLS policies. Only used for:
+  - task_access inserts (no RLS INSERT policy)
+  - task_audit_log inserts (no RLS INSERT policy)
+  - notifications inserts (no RLS INSERT policy)
+  - profile creation
+  - recurring task generation (cron)
+If this key is leaked, an attacker can read, write, and delete any data in
+the entire database without restriction.
+
+----------------------------------------------------------------------
+DATABASE_URL
+----------------------------------------------------------------------
+Type: Server-only
+Format: postgresql://postgres.USER:PASSWORD@HOST:6543/postgres
+Port: 6543 (PgBouncer transaction pooler)
+Used in: src/db/index.ts (Drizzle ORM, all runtime queries)
+Purpose: App runtime database connection. Uses Drizzle with prepare: false
+to be compatible with PgBouncer transaction mode.
+
+----------------------------------------------------------------------
+DATABASE_URL_DIRECT
+----------------------------------------------------------------------
+Type: Server-only (devDependency usage only)
+Format: postgresql://postgres.USER:PASSWORD@HOST:5432/postgres
+Port: 5432 (direct PostgreSQL connection, bypasses PgBouncer)
+Used in: drizzle.config.ts (drizzle-kit push/generate/migrate only)
+Purpose: Direct connection for drizzle-kit migrations. NEVER use in app
+runtime code. Using this URL in the app would create non-pooled connections
+that exhaust the Supabase connection limit.
+
+----------------------------------------------------------------------
+RESEND_API_KEY
+----------------------------------------------------------------------
+Type: Server-only
+Format: re_...
+Used in: src/app/api/cron/digest/route.ts
+Purpose: Authenticates email sending requests to Resend's API. Without this,
+the daily digest emails fail silently (the cron runs but no emails are sent).
+
+----------------------------------------------------------------------
+CRON_SECRET
+----------------------------------------------------------------------
+Type: Server-only
+Format: Any string (use a long random string in production)
+Used in: src/app/api/cron/recurring/route.ts,
+         src/app/api/cron/digest/route.ts,
+         src/app/api/cron/compliance/route.ts
+Purpose: Bearer token that all three cron endpoints require. Vercel sends this
+automatically when it calls the cron routes. Without it, anyone with the cron
+URL could trigger mass email sending or task generation.
+Development default: 'hello_my_name_is_Anmol' (change for production)
+
+----------------------------------------------------------------------
+NEXT_PUBLIC_APP_URL
+----------------------------------------------------------------------
+Type: Public (exposed to browser)
+Format: https://filio.vercel.app (or custom domain)
+Used in: src/app/api/cron/digest/route.ts (for task deep-links in emails)
+Purpose: The public URL of the deployed application. Used to build task links
+in email templates (e.g., ${appUrl}/dashboard/tasks/${taskId}).
+Development value: http://localhost:3000
+
+
+================================================================================
+SECTION 15 — SECURITY MODEL
+================================================================================
+
+This section documents every security decision in the codebase and why it
+was made.
+
+1. NEVER use getSession() in server code
+   getSession() reads the JWT from the cookie without verifying it with
+   Supabase servers. An attacker who controls cookies or the network can
+   present a forged JWT. getUser() validates with the auth server on every call.
+   Files that use getUser(): src/proxy.ts, src/lib/auth/getUser.ts,
+   src/app/api/notifications/stream/route.ts.
+
+2. NEVER expose the service role key to the browser
+   SUPABASE_SECRET_KEY is never prefixed with NEXT_PUBLIC_. It is only used in
+   src/lib/supabase/server.ts inside createAdminClient(). The file has
+   'import server-only' which prevents it from being imported in client
+   components.
+
+3. createAdminClient() is restricted to specific operations
+   Permitted uses:
+     - task_access INSERT (no RLS INSERT policy exists)
+     - task_audit_log INSERT (immutable — no RLS INSERT policy)
+     - notifications INSERT (no RLS INSERT policy)
+     - profile creation by an admin server action
+     - recurring task generation (no auth session in cron)
+   Prohibited in: client components, middleware, route handlers (unless explicitly privileged)
+
+4. No WITH CHECK (true) in RLS policies
+   Every INSERT policy specifies the exact conditions. No policy grants
+   universal write access.
+
+5. Soft delete only
+   No DELETE FROM is ever executed in application code. is_active = false
+   is the deletion mechanism for tasks, clients, and profiles. This preserves
+   historical data and audit trails permanently.
+
+6. UUID validation on all ID inputs
+   Every server action that accepts a task_id, user_id, or other UUID runs:
+   z.string().uuid().safeParse(id) before using it in a query.
+   This prevents SQL injection via malformed ID strings.
+
+7. Zod validation on all server action inputs
+   Every server action calls schema.safeParse(input) and returns an error if
+   validation fails. Invalid data never reaches the database.
+
+8. CRON_SECRET protects all cron endpoints
+   All three cron route handlers check the Authorization: Bearer header before
+   doing any work. Missing or wrong secret = 401.
+
+9. import 'server-only' on sensitive modules
+   Files that must never be bundled into the client:
+     src/lib/supabase/server.ts        — contains service role key usage
+     src/lib/auth/getUser.ts           — server-side auth helper
+     src/db/index.ts                   — database connection
+     src/lib/cron/recurring.ts         — cron logic with admin client calls
+     src/lib/compliance/deadlines.ts   — server-only compliance data
+   The 'server-only' package throws a build error if these are imported from
+   a Client Component, catching mistakes at build time.
+
+10. No cross-org data leakage possible
+    Every application-level query includes eq(table.org_id, ctx.orgId).
+    RLS policies add a second layer with get_my_org_id().
+    Even if a developer accidentally omits the org_id condition, RLS at the
+    database level prevents the query from returning data from other orgs.
+
+11. Notification insertion bypasses RLS by design
+    Notifications must be inserted for users who are not the current actor
+    (e.g., when assigning a task, the assignee receives a notification). Since
+    the assignee is not making the request, the notification must be inserted
+    via createAdminClient() which bypasses the user-scoped RLS. There is no RLS
+    INSERT policy on notifications to prevent accidental direct inserts.
+
+12. task_audit_log immutability at RLS level
+    No UPDATE or DELETE policies exist on task_audit_log. Even the service role
+    could technically modify audit rows, but the application code contains no
+    such logic and the admin client is never used to update or delete audit rows.
+
+13. profiles_update_own has column-restricting WITH CHECK
+    The original RLS policy had USING (id = auth.uid()) but no WITH CHECK clause.
+    Without WITH CHECK, a user could POST to PostgREST and set is_org_admin=true
+    on their own profile row (the USING clause let the row be found, and the
+    missing WITH CHECK meant no write restriction). Fixed:
+      WITH CHECK (
+        id = auth.uid()
+        AND is_org_admin = (SELECT is_org_admin FROM profiles WHERE id = auth.uid())
+        AND org_id = (SELECT org_id FROM profiles WHERE id = auth.uid())
+        AND is_active = (SELECT is_active FROM profiles WHERE id = auth.uid())
+      )
+    Users can update their own profile (avatar, display name) but cannot change
+    their admin status, org membership, or active status.
+
+14. CSP: unsafe-eval restricted to development only
+    Content Security Policy script-src includes 'unsafe-eval' only when
+    NODE_ENV === 'development' (needed by Next.js fast refresh). Production
+    builds serve without unsafe-eval. Configured in next.config.ts.
+
+15. Seed script production guard
+    src/db/seed.ts throws immediately if NODE_ENV === 'production'. This prevents
+    accidentally wiping real firm data by running npm run seed on the production
+    database connection.
+
+16. Orphan rollback in createTask
+    createTask inserts into tasks (Drizzle pooler client) then inserts into
+    task_access (Supabase admin client). These are two separate clients — no
+    distributed transaction is possible. If the task_access insert fails, a
+    compensating DELETE is executed on the tasks row so no invisible orphan task
+    remains in the database. Same pattern in generateTasksFromTemplates (cron).
+
+17. Environment variable validation at startup
+    src/lib/env.ts (imported server-only) iterates all 7 required env vars and
+    throws immediately if any is missing. The app refuses to boot with a clear
+    error message rather than silently failing at runtime when the missing var
+    is first needed.
+
+
+================================================================================
+SECTION 16 — PROJECT STRUCTURE
+================================================================================
+
+filio/
+  CLAUDE.md                     — Master project instructions for all agents.
+                                  Single source of truth. Overrides all defaults.
+
+  .claude/
+    agents/                     — Agent definitions for subagent orchestration
+      schema-engineer.md        — Database schema and migration specialist
+      auth-security-engineer.md — Auth layer and RLS specialist
+      backend-engineer.md       — Server actions and cron specialist
+      frontend-engineer.md      — UI components specialist
+      realtime-engineer.md      — Supabase Realtime and SSE specialist
+      security-reviewer.md      — Read-only security audit agent
+      qa-engineer.md            — Build verification and QA agent
+
+  drizzle.config.ts             — Drizzle Kit configuration.
+                                  Uses DATABASE_URL_DIRECT (port 5432).
+                                  Do NOT change to DATABASE_URL.
+
+  drizzle/                      — Generated SQL migration files.
+                                  Committed to git. Source of truth for
+                                  schema history.
+
+  vercel.json                   — Three cron job definitions.
+
+  package.json                  — Dependencies and scripts.
+                                  "seed" script runs tsx src/db/seed.ts.
+
+  docs/
+    system_design.txt           — This document.
+    to_do.txt                   — Manual setup steps (10 steps).
+    market_research.txt         — Competitive analysis.
+    investor_perspectives.txt   — Investor framing.
+
+  src/
+    app/
+      layout.tsx                — Root layout. Theme provider, font setup.
+      page.tsx                  — Root page (redirects to /dashboard).
+      globals.css               — Tailwind v4 CSS-first configuration.
+                                  All custom tokens live here.
+
+      (auth)/                   — Route group. No layout wrapper.
+        login/page.tsx          — Login form component.
+        auth/
+          callback/route.ts     — Supabase auth callback handler (magic links).
+          logout/route.ts       — POST handler: signOut + redirect to /login.
+
+      (dashboard)/              — Route group for all protected pages.
+        layout.tsx              — Auth guard + sidebar shell. Calls
+                                  getCurrentUser() and redirects if null.
+        page.tsx                — Accountability dashboard (StatsGrid,
+                                  OverdueTable, WorkloadChart, DeadlineCalendar)
+        tasks/
+          page.tsx              — Task list with TanStack Table.
+          [id]/page.tsx         — Task detail: right panel with chat + audit log.
+          pool/page.tsx         — Open task pool.
+        clients/page.tsx        — Client master: list + CRUD modal.
+        admin/
+          hierarchy/page.tsx    — dnd-kit role tree builder.
+          users/page.tsx        — User management (create, deactivate).
+          recurring/page.tsx    — Recurring template management.
+
+      api/
+        health/route.ts         — GET handler. SELECT 1 DB ping. Returns
+                                  { status, db, latency_ms } or 503.
+        notifications/
+          stream/route.ts       — GET handler. Returns recent notifications
+                                  as JSON. Initial load fallback.
+                                  (NotificationBell uses Supabase Realtime
+                                  directly in browser — not this endpoint.)
+        cron/
+          recurring/route.ts    — GET handler. Calls generateTasksFromTemplates.
+                                  maxDuration=300. Structured JSON logging.
+          digest/route.ts       — GET handler. Sends daily digest emails.
+                                  maxDuration=300. Batched queries, parallel sends.
+          compliance/route.ts   — GET handler. Sends compliance deadline alerts.
+                                  maxDuration=300. Structured JSON logging.
+
+    actions/                    — ALL server mutations. 'use server' at top.
+      tasks.ts                  — createTask, updateTaskStatus, getMyTasks,
+                                  getTaskDetail, getPoolTasks, claimPoolTask,
+                                  grantTaskAccess, addTaskMessage, updateTask,
+                                  deactivateTask, getTaskMessages.
+      clients.ts                — getClients, createClient, updateClient,
+                                  deactivateClient.
+      hierarchy.ts              — getRoles, createRole, updateRole, deleteRole,
+                                  reorderRoles.
+      users.ts                  — getUsers, createUser (admin client),
+                                  updateUserRole, deactivateUser.
+      dashboard.ts              — getDashboardStats, getOverdueTasks,
+                                  getWorkloadData.
+      notifications.ts          — getNotifications, markAsRead, markAllAsRead.
+      recurring.ts              — getTemplates, createTemplate, updateTemplate,
+                                  deactivateTemplate.
+      attendance.ts             — getAttendanceForDate, markAttendance,
+                                  bulkMarkAttendance, getMonthlyAttendanceSummary.
+
+    components/
+      ui/                       — shadcn/ui auto-generated components.
+                                  Never modified manually.
+      tasks/
+        TaskTable.tsx           — TanStack Table v8 task list.
+        TaskCard.tsx            — Compact task summary card.
+        TaskForm.tsx            — Create/edit modal with react-hook-form + zod.
+        TaskDetail.tsx          — Right-panel layout for task detail view.
+        TaskChat.tsx            — Supabase Realtime chat component.
+        AuditLog.tsx            — Immutable audit timeline.
+        StatusBadge.tsx         — Color-coded status pill.
+        StatusStepper.tsx       — Visual status progression widget.
+        PriorityBadge.tsx       — Priority indicator.
+        TaskTypeChip.tsx        — GST/TDS/etc. category chip.
+      hierarchy/
+        OrgTree.tsx             — dnd-kit drag tree for role hierarchy.
+        RoleNode.tsx            — Individual draggable role item.
+        RoleEditor.tsx          — Modal for creating/editing a role.
+      dashboard/
+        StatsGrid.tsx           — KPI cards (overdue count, in-progress, etc.)
+        OverdueTable.tsx        — Red table of overdue tasks.
+        WorkloadChart.tsx       — Recharts bar chart per team member.
+        DeadlineCalendar.tsx    — react-big-calendar compliance calendar.
+      layout/
+        AppSidebar.tsx          — shadcn Sidebar navigation.
+        Header.tsx              — Top bar with breadcrumb and user menu.
+        NotificationBell.tsx    — SSE consumer, unread count badge.
+      providers/
+        QueryProvider.tsx       — TanStack Query client provider.
+
+    db/
+      schema.ts                 — Drizzle table and enum definitions (all 11 tables).
+      index.ts                  — Exports db (pooler) and dbDirect.
+                                  'import server-only' at top.
+                                  db uses prepare: false for PgBouncer.
+      seed.ts                   — Initial data: 1 org, 6 roles, 5 clients.
+                                  Run with: npm run seed
+      rls.sql                   — RLS policies for all 11 tables.
+                                  Run in Supabase SQL Editor.
+
+    lib/
+      supabase/
+        client.ts               — createBrowserClient() for client components.
+        server.ts               — createClient() (SSR) and createAdminClient()
+                                  (service role). 'import server-only'.
+      auth/
+        getUser.ts              — getCurrentUser() with React cache().
+                                  'import server-only'.
+        signIn.ts               — signInAndVerifyProfile() — checks profile
+                                  existence after auth.
+      utils/
+        hierarchy.ts            — getUserSubtree() recursive CTE helper.
+        permissions.ts          — canUserAssignTo() hierarchy check.
+      compliance/
+        deadlines.ts            — COMPLIANCE_DEADLINES_FY2627 array.
+                                  getUpcomingDeadlines(), getDeadlinesForMonth().
+                                  'import server-only'.
+      cron/
+        recurring.ts            — generateTasksFromTemplates(). NOT a server action.
+                                  'import server-only'.
+      validations/
+        task.ts                 — createTaskSchema, updateStatusSchema,
+                                  addMessageSchema, STATUS_TRANSITIONS map.
+
+    emails/
+      DailyDigest.tsx           — React Email template for daily digest.
+
+    types/
+      index.ts                  — All inferred Drizzle types. Re-exports for use
+                                  across the codebase.
+                                  Task, Profile, Role, Client, TaskAccess,
+                                  TaskAuditLog, TaskMessage, Notification,
+                                  AttendanceRecord, RecurringTemplate, Org.
+
+    proxy.ts                    — Middleware implementation. route protection,
+                                  session refresh. Called by middleware.ts.
+    middleware.ts               — Next.js middleware entry point. Imports and
+                                  calls proxy(). Uses config.matcher to exclude
+                                  static files.
+
+
+================================================================================
+SECTION 17 — MANUAL SETUP STEPS
+================================================================================
+
+These steps must be completed by the developer before the app will function.
+They touch the live Supabase database, external services, or require secrets
+that only the developer holds. Claude cannot complete these steps.
+
+STEP 1: Push the Drizzle schema to Supabase
+--------------------------------------------
+Run in terminal at the project root:
+
+    npx drizzle-kit push
+
+This creates all 11 tables and 7 enums in the Supabase PostgreSQL database.
+Confirm the diff when prompted — it should show all tables being created fresh.
+Uses DATABASE_URL_DIRECT (port 5432) as configured in drizzle.config.ts.
+Status: [ ] Not yet done
+
+STEP 2: Seed the database
+--------------------------
+Run in terminal at the project root:
+
+    npm run seed
+
+This inserts:
+  - 1 org: Sharma & Associates
+  - 6 roles: Founding Partner, Partner, Senior Manager, Manager,
+    Article Assistant, Intern (with correct parent hierarchy and sort_order)
+  - 5 clients: Rajesh Textiles, Mehta Constructions, Patel Trading Co,
+    ABC Industries, XYZ Services
+Status: [ ] Not yet done
+
+STEP 3: Apply RLS policies in Supabase SQL Editor
+--------------------------------------------------
+1. Open your Supabase project dashboard
+2. Go to SQL Editor
+3. Open the file: src/db/rls.sql
+4. Copy the entire contents and paste into the SQL Editor
+5. Click Run
+
+This enables Row Level Security on all 11 tables and creates the 4 security
+helper functions (get_my_org_id, is_org_admin, is_task_member, is_task_owner).
+Status: [ ] Not yet done
+
+STEP 4: Enable Realtime (for chat + notifications)
+---------------------------------------------------
+In Supabase dashboard -> Database -> Replication:
+  Enable realtime on: task_messages
+  Enable realtime on: notifications
+  Enable realtime on: tasks   (for live status updates)
+
+Without this, TaskChat and NotificationBell will not receive live updates.
+Status: [ ] Not yet done
+
+STEP 5: Create Supabase Storage bucket
+---------------------------------------
+In Supabase dashboard -> Storage:
+  Click New bucket
+  Name: task-files
+  Toggle: Private (NOT public)
+  File size limit: 20971520 (= 20 MB)
+  Click Save
+
+Then add RLS policies to the bucket (SQL Editor):
+
+  CREATE POLICY "Org members can upload" ON storage.objects
+    FOR INSERT WITH CHECK (
+      bucket_id = 'task-files'
+      AND auth.uid() IS NOT NULL
+    );
+
+  CREATE POLICY "Org members can read own org files" ON storage.objects
+    FOR SELECT USING (
+      bucket_id = 'task-files'
+      AND auth.uid() IS NOT NULL
+    );
+
+Status: [ ] Not yet done
+
+STEP 6: Create your first user
+--------------------------------
+In Supabase dashboard -> Authentication -> Users:
+  Click Add user -> Create new user
+  Enter your email and a password
+  Copy the user UUID from the users list
+
+Then in Supabase -> Table Editor -> profiles table -> Insert row:
+  id: <paste the UUID from above>
+  org_id: <copy from the orgs table — seeded in Step 2>
+  role_id: <copy the Founding Partner role id from roles table>
+  full_name: Your Name
+  email: your@email.com
+  is_active: true
+  is_org_admin: true
+
+Status: [ ] Not yet done
+
+STEP 7: Set up Resend for email notifications
+----------------------------------------------
+1. Create a free account at https://resend.com
+2. Go to API Keys -> Create API Key
+3. Copy the key and paste into .env.local:
+     RESEND_API_KEY=re_your_actual_key_here
+4. In Resend dashboard -> Domains: add and verify your sending domain
+   (or use onboarding@resend.dev for testing without domain verification)
+5. Update the FROM address in src/app/api/cron/digest/route.ts if needed
+   Current FROM: 'Filio <digest@filio.app>'
+Status: [ ] Not yet done
+
+STEP 8: Set the CRON_SECRET for cron job security
+---------------------------------------------------
+The .env.local file has:
+  CRON_SECRET=hello_my_name_is_Anmol
+
+For production (Vercel), add this same value to:
+  Vercel Dashboard -> Your Project -> Settings -> Environment Variables
+  Key: CRON_SECRET
+  Value: hello_my_name_is_Anmol  (or generate a stronger random string)
+
+The vercel.json cron config will call the three cron endpoints with this
+secret in the Authorization header automatically.
+Status: [ ] Not yet done
+
+STEP 9: Vercel deployment (Session 7)
+--------------------------------------
+1. Push code to GitHub (if not already done)
+2. Connect the repo to Vercel (vercel.com -> Add New -> Project)
+3. Add ALL env vars from .env.local to Vercel:
+     NEXT_PUBLIC_SUPABASE_URL
+     NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+     SUPABASE_SECRET_KEY
+     DATABASE_URL
+     DATABASE_URL_DIRECT
+     NEXT_PUBLIC_APP_URL  (set to your Vercel domain, e.g. https://filio.vercel.app)
+     RESEND_API_KEY
+     CRON_SECRET
+4. Deploy -> copy production URL -> update NEXT_PUBLIC_APP_URL to match
+Status: [ ] Not yet done
+
+STEP 10: Update Supabase Auth callback URL for production
+---------------------------------------------------------
+In Supabase dashboard -> Authentication -> URL Configuration:
+  Site URL: https://your-app.vercel.app
+  Redirect URLs: add https://your-app.vercel.app/auth/callback
+
+Without this, magic link authentication will redirect to localhost in
+production, breaking the auth flow entirely.
+Status: [ ] Not yet done
+
+
+================================================================================
+SECTION 18 — FEATURE COMPLETE LIST
+================================================================================
+
+Database and Schema
+  - 11 tables with all relationships, indexes, and constraints
+  - 7 PostgreSQL enums (task_type, task_status, task_priority, access_level,
+    attendance_status, audit_action, recurring_cadence)
+  - 11 query-path indexes: org_id on tasks/profiles/clients/roles/notifications,
+    assignee_id on tasks, status on tasks, due_at on tasks,
+    task_id on task_access/task_messages/task_audit_log,
+    user_id on task_access/notifications, is_read on notifications,
+    (org_id, is_active) on recurring_templates
+  - updated_at on profiles, clients, roles, recurring_templates (all .set() calls
+    include updated_at: new Date())
+  - Drizzle relations for all foreign keys
+  - Seed data (1 org, 6 roles, 5 clients) with production guard
+
+Security
+  - RLS enabled on all 11 tables
+  - 4 SECURITY DEFINER helper functions (get_my_org_id, is_org_admin,
+    is_task_member, is_task_owner)
+  - 24+ individual RLS policies (SELECT/INSERT/UPDATE/DELETE per table)
+  - profiles_update_own WITH CHECK — prevents self-promotion to org_admin
+  - Middleware route protection (proxy.ts + middleware.ts)
+  - getUser() not getSession() throughout
+  - import server-only on all sensitive modules (server.ts, getUser.ts,
+    db/index.ts, cron/recurring.ts, compliance/deadlines.ts)
+  - CRON_SECRET protection on all cron endpoints
+  - Zod validation on all server action inputs
+  - UUID validation on all ID parameters
+  - Environment variable validation at startup (7 required vars, throws on boot)
+  - Seed script production guard (throws immediately if NODE_ENV=production)
+  - CSP: unsafe-eval only in development; removed from production
+  - X-Frame-Options: DENY, X-Content-Type-Options: nosniff, HSTS,
+    Referrer-Policy, Permissions-Policy (all via next.config.ts headers)
+  - Orphan rollback: createTask and recurring cron delete the task row if the
+    subsequent task_access insert fails
+
+Authentication
+  - Supabase Auth integration (createBrowserClient, createServerClient)
+  - createAdminClient (service role, bypasses RLS)
+  - getCurrentUser with React cache() deduplication
+  - signInAndVerifyProfile (checks profile existence after auth)
+  - Route protection via middleware
+
+Task Engine (src/actions/tasks.ts)
+  - createTask (org isolation, access grants, audit log, notification,
+    orphan rollback)
+  - updateTaskStatus (transition validation, immutable completed check)
+  - updateTask (field updates, reassignment with access grant + notification)
+  - getMyTasks (Zod-validated filters: status, task_type, priority, assignee_id)
+  - getTaskDetail (full relations: client, assignee, creator, access list,
+    audit log, messages)
+  - getPoolTasks (open pool only)
+  - claimPoolTask (claim with access grant and audit log)
+  - grantTaskAccess (owner-only, upsert pattern)
+  - addTaskMessage (task member check, org check)
+  - deactivateTask (soft delete, owner-only)
+  - getTaskMessages (for chat hydration on first load)
+
+UI — Task Views (src/components/tasks/)
+  - TaskTable — TanStack Table v8, filter/sort by status/type/priority/assignee
+  - TaskForm — react-hook-form + Zod, create/edit modal
+  - TaskDetail — right-panel layout with access list, status stepper
+  - TaskChat — Supabase Realtime WebSocket chat, message history on mount,
+    error callback on CHANNEL_ERROR/TIMED_OUT
+  - AuditLog — immutable chronological timeline
+  - StatusBadge — colour-coded status pill
+  - StatusStepper — visual workflow progression widget
+  - PriorityBadge — priority indicator (Urgent/High/Medium/Low)
+  - TaskTypeChip — GST/TDS/etc. category chip
+  - TasksClient — full task list page with filter controls
+  - PoolClient — open task pool page with claim button
+
+UI — Dashboard (src/components/dashboard/)
+  - StatsGrid — 5 KPI cards: total, overdue, due-soon, completed-this-month,
+    under-review
+  - OverdueTable — red-highlighted overdue tasks table (oldest-first, limit 20)
+  - WorkloadChart — Recharts bar chart, per-user in_progress + under_review
+  - DeadlineCalendar — react-big-calendar month view with task deadlines
+
+UI — Admin (src/components/hierarchy/, users/, clients/, recurring/)
+  - OrgTree — dnd-kit drag-and-drop role hierarchy builder
+  - RoleNode — draggable role item
+  - RoleEditor — create/edit role modal
+  - UsersClient — user list, invite modal, deactivate action
+  - ClientsClient — client master CRUD
+  - RecurringClient — recurring template management (admin only)
+
+UI — Attendance (src/components/attendance/)
+  - AttendanceSheet — daily attendance grid, bulk mark, individual mark
+  - MonthlySummary — per-staff monthly totals (present/absent/half-day/leave)
+
+UI — Compliance (src/components/compliance/)
+  - ComplianceCalendar — react-big-calendar view of statutory deadlines for
+    current financial year (dynamically generated, never hardcoded)
+
+UI — Layout (src/components/layout/)
+  - AppSidebar — shadcn Sidebar navigation
+  - Header — breadcrumb, user menu, logout
+  - NotificationBell — Supabase Realtime browser subscription, unread badge,
+    error callback on CHANNEL_ERROR/TIMED_OUT
+  - DashboardShell — layout wrapper with sidebar + main content area
+
+Recurring Task Engine
+  - generateTasksFromTemplates (lib/cron/recurring.ts, server-only)
+  - shouldFireToday logic for all 4 cadences
+  - half_yearly correctly maps to Indian FY half-years:
+    Apr-Sep fires → Oct due (Sep 30); Oct-Mar fires → Apr due (Mar 31)
+  - Admin profile lookup as creator
+  - Role-based assignee resolution
+  - Fallback to open pool if no assignee found
+  - Due date calculation (today + days_before_due at 23:59:59)
+  - Full task lifecycle: task + access + audit log + notification
+  - Orphan rollback on task_access failure
+
+Attendance Management (src/actions/attendance.ts)
+  - getAttendanceForDate (single date view, sorted by role hierarchy)
+  - markAttendance (single upsert, YYYY-MM-DD validation)
+  - bulkMarkAttendance (batch upsert, batch org validation, inArray())
+  - getMonthlyAttendanceSummary (monthly aggregation per staff member)
+
+Compliance Calendar (src/lib/compliance/deadlines.ts)
+  - Dynamic FY generation via getIndianFYStartYear() — always shows current
+    financial year, never needs manual update
+  - GST: 12x GSTR-1, 12x GSTR-3B, 12x GSTR-2B reconciliation, 1x GSTR-9
+  - TDS: 12x monthly deposits, 4x quarterly returns, 1x Form 16
+  - Income Tax: 5 key deadlines (ITR individual/audit/company/revised, audit report)
+  - Advance Tax: 4 quarterly installments
+  - ROC/MCA: 5 filings (Form 11, DIR-3 KYC, AOC-4, Form 8, MGT-7)
+  - Payroll: 12x PF deposit, 12x ESI deposit, 12x PF ECR return
+  - getUpcomingDeadlines(days) helper
+  - getDeadlinesForMonth(year, month) helper
+
+Notifications and Email
+  - NotificationBell: Supabase Realtime browser subscription (no SSE)
+  - Notifications inserted via admin client for: task assigned, task reassigned,
+    task submitted for review, compliance deadline approaching
+  - Daily digest email via Resend (/api/cron/digest, GET, maxDuration=300)
+  - Digest rewritten: 3 batch queries total + parallel email sends (10 at a time)
+    (replaces O(n) sequential pattern that would timeout at 40+ users)
+  - DailyDigest React Email template (overdue + due-soon sections, task deep-links)
+  - Per-user overdue and due-soon task selection
+  - Skip users with nothing to report
+  - Per-user error isolation (loop continues on failure)
+
+Cron Infrastructure
+  - vercel.json with 3 cron schedules
+  - /api/cron/recurring (daily 1 AM UTC, GET, maxDuration=300)
+  - /api/cron/digest (Mon-Sat 7 AM UTC, GET, maxDuration=300)
+  - /api/cron/compliance (daily 8 AM UTC, GET, maxDuration=300)
+  - CRON_SECRET Bearer token auth on all three
+  - Structured JSON logging: { level, cron, event, duration_ms, ...metrics }
+    on start and complete for every cron run
+  - Healthchecks.io dead-man's-switch: HC_PING_RECURRING_URL,
+    HC_PING_DIGEST_URL, HC_PING_COMPLIANCE_URL env vars (optional);
+    fire-and-forget GET ping at end of each successful cron run
+
+Monitoring
+  - GET /api/health — SELECT 1 DB ping, returns { status, db, latency_ms }
+    or { status: 'error', db: 'unreachable' } with HTTP 503
+  - Structured JSON logs on all 3 cron routes (parseable by Datadog/Grafana/Loki)
+  - Healthchecks.io integration for dead-man's-switch alerting on missed crons
+
+
+================================================================================
+SECTION 19 — KNOWN GAPS AND FUTURE ROADMAP
+================================================================================
+
+These features are not built yet, ranked by business impact for a CA firm.
+All are validated against market research (ERPCA, Jamku, MyTask competitive
+analysis) and real CA firm pain points.
+
+1. Client Portal — HIGH PRIORITY
+   A secure link sent to the client (not a login account) allowing them to:
+   upload documents requested by the firm, view the status of their filings.
+   Currently the firm calls the client to request documents; the client emails
+   them to a personal inbox. Document loss and version confusion is common.
+   Implementation: signed URL links, storage bucket, client-visible task status.
+
+2. Time Tracking and Billing — HIGH PRIORITY
+   Log hours spent per task/client. Generate invoices based on hours or
+   flat fees. Currently completely manual (if done at all).
+   Implementation: time_entries table, billing_items, invoice generation.
+
+3. File Upload in TaskChat — MEDIUM PRIORITY
+   task_messages already has file_url and file_name columns and the Supabase
+   Storage bucket (task-files, private, 20MB limit) is configured in setup steps.
+   What is NOT built: the upload button in TaskChat, the client-side upload action
+   (supabase.storage.from('task-files').upload()), and the signed URL generation
+   for viewing uploaded files. The data model is ready; only the UI and action
+   are missing.
+
+4. Dependency Tasks — MEDIUM PRIORITY
+   Some CA work has sequential dependencies: TDS quarterly return cannot be
+   filed until all monthly TDS deposits are confirmed. A task cannot start
+   until its dependency task is completed.
+   Implementation: task_dependencies table, dependency check in status transitions.
+
+5. Sub-tasks / Checklists — MEDIUM PRIORITY
+   Within an audit engagement, there are 20+ sub-steps. Tracking these as
+   separate tasks creates clutter. A lightweight checklist inside a task
+   (title, done: boolean) would address this.
+   Implementation: task_checklist_items table, inline UI in TaskDetail.
+
+6. Notice Management Enhancements — MEDIUM PRIORITY
+   Notices from tax departments are extremely stressful events. A dedicated
+   notice workflow with: receipt date, response deadline (30/60/90 days),
+   document attachments, and response tracking would be high-value.
+
+7. Multi-firm Task Delegation — LOW PRIORITY (V2)
+   Some networks of CA firms refer work to each other. A task could be
+   delegated to a different org. Complex multi-tenancy implications.
+
+8. GST Reconciliation AI — LOW PRIORITY (V3)
+   Automated comparison of GSTR-2B with purchase register to flag ITC
+   mismatches. Would require integration with Zoho Books, Tally, or GST portal
+   data export APIs.
+
+9. Mobile App — LOW PRIORITY (V2)
+   Article assistants are often mobile. A React Native (Expo) version sharing
+   the same Server Actions API would extend reach.
+
+10. Client Financial Year Summary Reports — LOW PRIORITY
+    Auto-generated PDF report per client showing all work done, filed returns,
+    and pending items for the financial year. Useful for client review meetings.
+
+
+================================================================================
+SECTION 20 — GLOSSARY
+================================================================================
+
+Terms a non-CA person needs to know to understand Filio's domain.
+
+CA (Chartered Accountant)
+  A professional accountant licensed by ICAI. In India, CAs provide statutory
+  audit, tax filing, GST compliance, and financial advisory services. A CA firm
+  is a partnership of one or more CAs, supported by managers and article trainees.
+
+ICAI (Institute of Chartered Accountants of India)
+  The regulatory body that licenses CAs in India. Sets ethical standards and
+  continuing education requirements. All practising CAs are ICAI members.
+
+GST (Goods and Services Tax)
+  India's unified indirect tax system, introduced in 2017. Replaces VAT, excise,
+  and service tax. Every business above a revenue threshold must register for GST,
+  file monthly/quarterly returns, and pay GST on sales while claiming credit on
+  purchases.
+
+GSTR-1
+  Monthly GST return reporting all outward supplies (sales). Due by the 11th of
+  the following month. Contains B2B invoice details that the buyer's GSTR-2B is
+  auto-populated from.
+
+GSTR-3B
+  Monthly summary GST return and tax payment form. Due by the 20th of the following
+  month. Requires paying the net GST liability (output tax minus input tax credit).
+  One of the most critical monthly filings. Missing it triggers interest and penalties.
+
+GSTR-2B
+  Auto-generated statement of input tax credit (ITC) available to a taxpayer, based
+  on suppliers' GSTR-1 filings. Not a return to be filed — used for reconciliation
+  against purchase records before filing GSTR-3B.
+
+GSTR-9
+  Annual GST return reconciling all monthly returns for the financial year. Due by
+  September 30 of the following year.
+
+TDS (Tax Deducted at Source)
+  A mechanism where the payer deducts income tax from certain payments (salary,
+  rent, professional fees, etc.) before paying the recipient, and deposits it with
+  the government. The CA firm helps clients comply with TDS obligations.
+
+Form 16
+  TDS certificate issued by an employer to an employee, showing total salary paid
+  and TDS deducted during the financial year. Employees use it to file their ITR.
+
+26AS
+  A consolidated tax statement from the Income Tax department showing all TDS
+  deducted, advance tax paid, and other tax credits for a taxpayer. Cross-checked
+  against the taxpayer's records during ITR preparation.
+
+ITR (Income Tax Return)
+  Annual income tax declaration filed with the Income Tax department. Different
+  ITR forms exist for individuals, businesses, and companies. The filing deadline
+  varies (July 31 for non-audit individuals, October 31 for audit cases,
+  November 30 for companies in FY 2026-27).
+
+ROC (Registrar of Companies) / MCA (Ministry of Corporate Affairs)
+  The government authority overseeing company and LLP registrations in India.
+  Companies must file annual returns (AOC-4, MGT-7) and event-based forms
+  (director changes, share allotments, etc.) with the ROC via the MCA21 portal.
+
+AOC-4
+  Annual filing form for a company's financial statements (balance sheet, P&L)
+  with the ROC. Due within 30 days of the Annual General Meeting (AGM).
+
+MGT-7 / MGT-7A
+  Annual return of a company filed with the ROC, containing details of
+  shareholders, directors, and shareholding structure. Due within 60 days of AGM.
+  MGT-7A is a simplified version for small companies.
+
+LLP (Limited Liability Partnership)
+  A hybrid business structure combining a partnership's flexibility with a
+  company's limited liability. LLPs file Form 11 (annual return) and Form 8
+  (statement of accounts) with the ROC.
+
+Advance Tax
+  Income tax paid in advance during the financial year rather than all at once
+  at year-end. Required when estimated tax liability exceeds Rs. 10,000. Paid
+  in four installments (June 15, September 15, December 15, March 15). Missing
+  installments triggers 1% per month interest.
+
+Articleship / Article Assistant
+  Mandatory 3-year practical training that CA students complete under a practising
+  CA before becoming licensed. Article assistants do most of the day-to-day work
+  in a CA firm (data entry, return preparation, reconciliation) under supervision.
+  They are typically paid a small stipend and are the most junior level in the
+  hierarchy.
+
+PAN (Permanent Account Number)
+  A 10-character alphanumeric identifier assigned by the Income Tax department
+  to every taxpayer in India (individuals, companies, etc.). Required for tax
+  filings, bank accounts, and high-value transactions. Format: AAAAA0000A.
+
+GSTIN (GST Identification Number)
+  A 15-digit identifier assigned to every GST-registered taxpayer. The first
+  2 digits are the state code, the next 10 are the PAN, and the remaining 3
+  distinguish multiple registrations.
+
+CBDT (Central Board of Direct Taxes)
+  Government body under the Ministry of Finance that administers income tax laws.
+  Issues circulars, notifications, and clarifications on direct tax matters.
+
+CBIC (Central Board of Indirect Taxes and Customs)
+  Government body that administers GST, customs, and central excise laws. Issues
+  GST circulars and notifications.
+
+Financial Year (FY) in India
+  The Indian financial year runs from April 1 to March 31 (unlike the calendar
+  year). FY 2026-27 means April 1, 2026 to March 31, 2027. Most CA work is
+  organised around financial years. The Assessment Year (AY) is the year
+  following the financial year (AY 2027-28 corresponds to FY 2026-27).
+
+EPF (Employees' Provident Fund)
+  A mandatory retirement savings scheme for employees in establishments with
+  20+ employees. Both employer (12% of basic salary) and employee (12%)
+  contribute. Managed by EPFO (Employees' Provident Fund Organisation).
+
+ESI (Employees' State Insurance)
+  A social security scheme for employees earning below a wage threshold, covering
+  medical benefits. Employer contributes 3.25% and employee 0.75% of gross wages.
+  Applicable to establishments with 10+ employees. Managed by ESIC.
+
+ECR (Electronic Challan cum Return)
+  Monthly PF compliance filing on the EPFO unified portal. Wage details for all
+  EPF members submitted alongside the contribution deposit.
+
+DIN (Director Identification Number)
+  An 8-digit unique identifier for every director of a company in India,
+  issued by MCA. Annual KYC filing (DIR-3 KYC) required by September 30
+  each year to keep the DIN active.
+
+================================================================================
+END OF DOCUMENT
+================================================================================
