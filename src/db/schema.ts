@@ -1,11 +1,28 @@
 import {
   pgTable,
+  pgEnum,
   uuid,
   text,
   boolean,
   timestamp,
+  date,
+  unique,
   index,
 } from 'drizzle-orm/pg-core';
+
+// ---------------------------------------------------------------------------
+// Enums
+// A pgEnum creates a Postgres-level enum type — the DB rejects any value
+// not in this list. Better than a plain text column: invalid values are
+// caught at the DB layer, not just in application code.
+// ---------------------------------------------------------------------------
+
+export const attendanceStatus = pgEnum('attendance_status', [
+  'present',
+  'absent',
+  'half_day',
+  'leave',
+]);
 
 // ---------------------------------------------------------------------------
 // orgs
@@ -42,5 +59,33 @@ export const profiles = pgTable(
   },
   (table) => [
     index('profiles_org_id_idx').on(table.org_id),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// attendance_records
+// One row = one person's attendance status on one specific date.
+//
+// Key design decision: unique('attendance_user_date_unique').on(user_id, date)
+// This constraint means Postgres will REJECT a second row for the same person
+// on the same day. This enables UPSERT — instead of "check if exists then
+// insert or update" (two queries, race condition possible), you always INSERT
+// and tell Postgres "on conflict, update instead". One query, always correct.
+// ---------------------------------------------------------------------------
+
+export const attendance_records = pgTable(
+  'attendance_records',
+  {
+    id:         uuid('id').primaryKey().defaultRandom(),
+    org_id:     uuid('org_id').notNull().references(() => orgs.id),
+    user_id:    uuid('user_id').notNull().references(() => profiles.id),
+    date:       date('date').notNull(),                    // stored as 'YYYY-MM-DD'
+    status:     attendanceStatus('status').notNull(),
+    note:       text('note'),                              // optional reason/comment
+    created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    unique('attendance_user_date_unique').on(table.user_id, table.date),
+    index('attendance_org_date_idx').on(table.org_id, table.date),
   ],
 );

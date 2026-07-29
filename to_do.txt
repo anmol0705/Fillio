@@ -5,16 +5,16 @@ Build in this exact order. Each section depends on the one above it.
 
 
 ────────────────────────────────────────────────────────────────────────────────
-1. AUTH
+1. AUTH ✓ DONE
 ────────────────────────────────────────────────────────────────────────────────
 
-[ ] Login page — email + password form
-[ ] Magic link login (passwordless — user gets a link on email)
-[ ] Session middleware — refresh session on every page request
-[ ] Route protection — unauthenticated users redirected to /login
-[ ] Profile existence check — if user exists in auth but has no profile row,
+[x] Login page — email + password form
+[x] Magic link login (passwordless — user gets a link on email)
+[x] Session middleware — refresh session on every page request
+[x] Route protection — unauthenticated users redirected to /login
+[x] Profile existence check — if user exists in auth but has no profile row,
     sign them out and show error (prevents ghost users)
-[ ] Logout
+[x] Logout
 
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -142,17 +142,17 @@ Build in this exact order. Each section depends on the one above it.
 
 
 ────────────────────────────────────────────────────────────────────────────────
-12. ATTENDANCE
+12. ATTENDANCE ✓ DONE
 ────────────────────────────────────────────────────────────────────────────────
 
-[ ] Mark attendance for a staff member on a given date
+[x] Mark attendance for a staff member on a given date
     — statuses: present, absent, half_day, leave
     — optional note
-[ ] UPSERT behaviour — marking the same day twice updates, does not duplicate
-[ ] Bulk mark — save attendance for the whole team for one date in one action
-[ ] Monthly summary — per-staff counts (present / absent / half_day / leave)
+[x] UPSERT behaviour — marking the same day twice updates, does not duplicate
+[x] Bulk mark — save attendance for the whole team for one date in one action
+[x] Monthly summary — per-staff counts (present / absent / half_day / leave)
     for a given month and year
-[ ] Permission — only org admin OR users with can_mark_attendance flag can
+[x] Permission — only org admin OR users with can_mark_attendance flag can
     mark attendance (regular users cannot)
 [ ] View own attendance — any user can see their own records
 
