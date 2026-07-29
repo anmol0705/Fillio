@@ -1,0 +1,274 @@
+================================================================================
+FILIO — COMPLETE FEATURE TO-DO LIST
+Build in this exact order. Each section depends on the one above it.
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+1. AUTH
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] Login page — email + password form
+[ ] Magic link login (passwordless — user gets a link on email)
+[ ] Session middleware — refresh session on every page request
+[ ] Route protection — unauthenticated users redirected to /login
+[ ] Profile existence check — if user exists in auth but has no profile row,
+    sign them out and show error (prevents ghost users)
+[ ] Logout
+
+
+────────────────────────────────────────────────────────────────────────────────
+2. ORG SETUP (runs once when the firm first signs up)
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] Create org — firm name, slug
+[ ] Create first admin profile — linked to the org
+[ ] Seed script — pre-populate one org + one admin so the app
+    can be used immediately without a UI signup flow
+
+
+────────────────────────────────────────────────────────────────────────────────
+3. USER MANAGEMENT
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] List all team members in the org
+[ ] Invite a new user — sends email invite, creates auth user + profile in
+    one step (if profile creation fails, auth user is cleaned up)
+[ ] Update user — full name, role, admin status
+[ ] Deactivate user — soft delete only (is_active = false), never hard delete
+[ ] Grant / revoke attendance permission (can_mark_attendance flag)
+[ ] Prevent admin from removing their own admin status if they are the last admin
+
+
+────────────────────────────────────────────────────────────────────────────────
+4. ROLES
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] Create role — name + colour (e.g. Partner, Manager, Article Assistant)
+[ ] List roles
+[ ] Edit role — name, colour
+[ ] Delete role — only if no active users have this role
+[ ] Assign role to a user (done via update user above)
+
+
+────────────────────────────────────────────────────────────────────────────────
+5. REPORTING STRUCTURE (who reports to whom)
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] Set reporting relationship — person A reports to person B
+    (many-to-many: one person can report to multiple managers,
+    one manager can have multiple reports)
+[ ] Remove a reporting relationship
+[ ] View reporting structure — list showing each person and their managers
+[ ] View who reports to me — for a manager to see their direct reports
+[ ] Recursive lookup — find everyone who reports to me directly OR indirectly
+    (needed for task assignment: a manager can only assign to people below them)
+
+
+────────────────────────────────────────────────────────────────────────────────
+6. CLIENTS
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] Add client — name, PAN, GSTIN, contact email, contact phone
+[ ] List all active clients
+[ ] Edit client details
+[ ] Deactivate client — soft delete (is_active = false)
+[ ] Search / filter clients by name
+
+
+────────────────────────────────────────────────────────────────────────────────
+7. TASKS — CORE
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] Create task — title, type (GST/TDS/Income Tax/Audit/ROC/Accounting/
+    Payroll/Notice/Advisory/Other), priority (urgent/high/medium/low),
+    due date, assignee, client (optional), financial year (optional),
+    open pool toggle
+[ ] List my tasks — tasks where the current user is creator or assignee
+    with filters: status, type, priority, assignee
+[ ] View task detail — all fields + who has access
+[ ] Edit task — title, description, priority, due date, assignee (owner only)
+[ ] Soft delete task — is_active = false (owner only)
+
+
+────────────────────────────────────────────────────────────────────────────────
+8. TASKS — STATUS WORKFLOW
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] Status transitions — enforce this exact sequence:
+    not_started → in_progress → under_review → changes_requested
+    changes_requested → in_progress  (loop back)
+    under_review → approved → filed → completed
+    Completed tasks are immutable — no further changes allowed
+[ ] Block invalid transitions — e.g. cannot jump from not_started to completed
+[ ] Block all edits on completed tasks
+
+
+────────────────────────────────────────────────────────────────────────────────
+9. TASKS — ACCESS CONTROL
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] task_access table — creator gets owner, assignee gets editor on creation
+[ ] Three access levels: owner (full control), editor (status + chat),
+    viewer (read + chat)
+[ ] Grant access — task owner can give editor or viewer access to any org member
+[ ] Open pool — tasks marked is_open_pool = true are visible to ALL org members
+[ ] Claim pool task — any org member can self-assign an open pool task
+
+
+────────────────────────────────────────────────────────────────────────────────
+10. TASKS — AUDIT LOG
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] Auto-log on task created
+[ ] Auto-log on status changed (record old and new status)
+[ ] Auto-log on task reassigned (record old and new assignee)
+[ ] Auto-log on access granted
+[ ] Auto-log on comment added
+[ ] View audit log on task detail page — chronological, immutable timeline
+[ ] Audit log rows are INSERT-only — no UPDATE or DELETE ever, enforced at DB level
+
+
+────────────────────────────────────────────────────────────────────────────────
+11. TASKS — CHAT
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] Send a message on a task (any user with any access level can message)
+[ ] Load message history on task detail page (server-side on first load)
+[ ] Real-time updates — new messages from other users appear instantly
+    without page refresh (Supabase Realtime / WebSocket)
+[ ] Deduplicate — own sent message should not appear twice
+    (once from server action, once from realtime echo)
+
+
+────────────────────────────────────────────────────────────────────────────────
+12. ATTENDANCE
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] Mark attendance for a staff member on a given date
+    — statuses: present, absent, half_day, leave
+    — optional note
+[ ] UPSERT behaviour — marking the same day twice updates, does not duplicate
+[ ] Bulk mark — save attendance for the whole team for one date in one action
+[ ] Monthly summary — per-staff counts (present / absent / half_day / leave)
+    for a given month and year
+[ ] Permission — only org admin OR users with can_mark_attendance flag can
+    mark attendance (regular users cannot)
+[ ] View own attendance — any user can see their own records
+
+
+────────────────────────────────────────────────────────────────────────────────
+13. RECURRING TASKS
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] Create recurring template — title, task type, cadence
+    (monthly / quarterly / half_yearly / annually), default priority,
+    default assignee role, default client, days before due date
+[ ] List recurring templates (admin only)
+[ ] Edit template
+[ ] Activate / deactivate template
+[ ] Cron job — runs at 1 AM IST daily, checks each active template:
+    monthly → fires on 1st of every month
+    quarterly → fires on 1st of Jan, Apr, Jul, Oct
+    half_yearly → fires on 1st of Apr and Oct (Indian financial year)
+    annually → fires on 1st of Apr only
+[ ] On fire — creates a real task from the template with correct due date
+[ ] Orphan protection — if task_access insert fails after task creation,
+    immediately delete the task so no orphan exists
+[ ] Cron protected by a secret key in request header
+[ ] Healthcheck ping on successful cron run
+
+
+────────────────────────────────────────────────────────────────────────────────
+14. NOTIFICATIONS
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] Create notification when a task is assigned to someone
+[ ] Create notification when a task is submitted for review (notifies creator)
+[ ] Create notification when a task is reassigned to someone new
+[ ] Notification bell in header — shows unread count badge
+[ ] Real-time bell — new notifications appear instantly without page refresh
+[ ] Mark one notification as read
+[ ] Mark all notifications as read
+[ ] Notifications are INSERT-only — created by server actions via service role,
+    never by the user directly
+
+
+────────────────────────────────────────────────────────────────────────────────
+15. DASHBOARD (accountability view — the founding partner's screen)
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] Total active tasks count
+[ ] Overdue tasks count (due_at is in the past, status not completed)
+[ ] Tasks due this week count
+[ ] Completed this month count
+[ ] Overdue tasks table — every overdue task with assignee name, client name,
+    due date, how many days overdue — sorted by most overdue first
+[ ] Workload chart — bar chart showing open task count per team member
+[ ] Deadline calendar — month view showing which tasks are due on which days
+
+
+────────────────────────────────────────────────────────────────────────────────
+16. EMAIL DIGEST
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] Daily email to each active user listing:
+    — their overdue tasks
+    — tasks due in the next 7 days
+[ ] Email sent via Resend
+[ ] React Email template for formatting
+[ ] Cron job runs once a day (separate from recurring task cron)
+[ ] Batch queries — fetch data for all users in 3 queries total,
+    not one query per user (avoids N+1 at scale)
+[ ] Cron protected by secret key
+
+
+────────────────────────────────────────────────────────────────────────────────
+17. COMPLIANCE CALENDAR
+────────────────────────────────────────────────────────────────────────────────
+
+[ ] Calendar view showing all upcoming task due dates across the org
+[ ] Month navigation (previous / next)
+[ ] Colour-coded by priority
+[ ] Click a date to see which tasks are due that day
+
+
+────────────────────────────────────────────────────────────────────────────────
+WHAT WE BUILD IN — ALWAYS, FOR EVERY FEATURE
+────────────────────────────────────────────────────────────────────────────────
+
+These are not features — they are rules that apply to every single action:
+
+[ ] Every server action starts with getCurrentUser() — if no session, return error
+[ ] Every DB query filters by org_id — one org never sees another's data
+[ ] Zod validation on every input before it touches the database
+[ ] Never use DELETE — always soft delete (is_active = false)
+[ ] Never use createAdminClient() in UI components or middleware —
+    only in server actions for privileged writes (task_access, audit_log,
+    notifications, profile creation)
+[ ] UUID validation before any ID is used in a query
+
+
+================================================================================
+BUILD ORDER SUMMARY
+================================================================================
+
+1.  Auth
+2.  Org setup + seed
+3.  User management
+4.  Roles
+5.  Reporting structure
+6.  Clients
+7.  Tasks core
+8.  Task status workflow
+9.  Task access control
+10. Task audit log
+11. Task chat
+12. Attendance
+13. Recurring tasks
+14. Notifications
+15. Dashboard
+16. Email digest
+17. Compliance calendar
+
+================================================================================
