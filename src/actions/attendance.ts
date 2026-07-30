@@ -1,10 +1,5 @@
 'use server';
 
-// 'use server' at the top marks every exported function in this file as a
-// Next.js Server Action. The function runs on the server. The browser calls
-// it like a normal async function — Next.js handles the network boundary
-// transparently. No fetch(), no API route, no JSON parsing needed.
-
 import { z } from 'zod';
 import { db } from '@/db';
 import { attendance_records, profiles } from '@/db/schema';
@@ -104,9 +99,7 @@ export type AttendanceRow = {
   record:  AttendanceRecord | null;
 };
 
-export async function getAttendanceForDate(
-  date: string,
-): Promise<{ data: AttendanceRow[] } | { error: string }> {
+export async function getAttendanceForDate( date: string,): Promise<{ data: AttendanceRow[] } | { error: string }> {
   const ctx = await resolveAttendanceManager();
   if (isErr(ctx)) return ctx;
 

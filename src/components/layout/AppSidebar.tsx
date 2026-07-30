@@ -13,6 +13,7 @@ import {
   Inbox,
   CalendarCheck,
   ClipboardList,
+  ShieldCheck,
   X,
 } from 'lucide-react';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -34,10 +35,11 @@ const NAV_ITEMS: NavItem[] = [
 ];
 
 const ADMIN_ITEMS: NavItem[] = [
-  { label: 'Hierarchy', href: '/dashboard/admin/hierarchy', icon: GitBranch },
-  { label: 'Users', href: '/dashboard/admin/users', icon: Users },
-  { label: 'Recurring', href: '/dashboard/admin/recurring', icon: RefreshCw },
+  { label: 'Users',      href: '/dashboard/admin/users',      icon: Users },
+  { label: 'Roles',      href: '/dashboard/admin/roles',      icon: ShieldCheck },
+  { label: 'Hierarchy',  href: '/dashboard/admin/hierarchy',  icon: GitBranch },
   { label: 'Attendance', href: '/dashboard/admin/attendance', icon: ClipboardList },
+  { label: 'Recurring',  href: '/dashboard/admin/recurring',  icon: RefreshCw },
 ];
 
 interface Props {

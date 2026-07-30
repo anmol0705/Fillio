@@ -1,35 +1,42 @@
 'use client';
 
 import { useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
-import { Plus } from 'lucide-react';
-import { TaskTable } from './TaskTable';
 import { TaskForm } from './TaskForm';
-import type { TaskWithRelations, Client, Profile } from '@/types';
+import { TasksTable } from './TasksTable';
+import type { TaskListItem, Client, Profile } from '@/types';
 
 interface Props {
-  tasks: TaskWithRelations[];
-  clients: Client[];
-  users: Profile[];
+  initialTasks: TaskListItem[];
+  clients:      Client[];
+  members:      Pick<Profile, 'id' | 'full_name'>[];
 }
 
-export function TasksClient({ tasks, clients, users }: Props) {
-  const [createOpen, setCreateOpen] = useState(false);
+export function TasksClient({ initialTasks, clients, members }: Props) {
+  const router = useRouter();
+  const [open, setOpen] = useState(false);
 
   return (
-    <div className="space-y-3">
-      <div className="flex justify-end">
-        <Button size="sm" onClick={() => setCreateOpen(true)} className="min-h-[44px]">
-          <Plus className="w-4 h-4 mr-1.5" />
-          New Task
-        </Button>
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold">My Tasks</h1>
+          <p className="text-sm text-muted-foreground mt-0.5">Tasks you created or have access to.</p>
+        </div>
+        <Button onClick={() => setOpen(true)}>New Task</Button>
       </div>
-      <TaskTable data={tasks} />
+
+      <TasksTable tasks={initialTasks} />
+
       <TaskForm
-        open={createOpen}
-        onClose={() => setCreateOpen(false)}
+        open={open}
+        onOpenChange={(v) => {
+          setOpen(v);
+          if (!v) router.refresh();
+        }}
         clients={clients}
-        users={users}
+        members={members}
       />
     </div>
   );

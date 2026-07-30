@@ -1,17 +1,29 @@
+import { redirect } from 'next/navigation';
+import { getCurrentUser } from '@/lib/auth/getUser';
 import { getOrgUsers } from '@/actions/users';
-import { UsersClient } from '@/components/users/UsersClient';
+import { getRoles } from '@/actions/roles';
+import { UsersTable } from '@/components/users/UsersTable';
 
 export default async function UsersPage() {
-  const result = await getOrgUsers();
+  const user = await getCurrentUser();
+  if (!user) redirect('/login');
 
-  if ('error' in result) {
-    return (
-      <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3">
-        <p className="text-sm text-destructive font-medium">Failed to load users</p>
-        <p className="text-xs text-muted-foreground mt-0.5">{result.error}</p>
-      </div>
-    );
-  }
+  // Fetch users and roles in parallel — they don't depend on each other
+  const [usersResult, rolesResult] = await Promise.all([
+    getOrgUsers(),
+    getRoles(),
+  ]);
 
-  return <UsersClient initialUsers={result.data} />;
+  if (usersResult.error !== null) redirect('/dashboard');
+
+  // Roles are optional — if fetching fails (e.g. non-admin somehow), just pass empty
+  const roles = rolesResult.error !== null ? [] : rolesResult.data;
+
+  return (
+    <UsersTable
+      users={usersResult.data}
+      roles={roles}
+      currentUserId={user.id}
+    />
+  );
 }

@@ -18,115 +18,115 @@ Build in this exact order. Each section depends on the one above it.
 
 
 ────────────────────────────────────────────────────────────────────────────────
-2. ORG SETUP (runs once when the firm first signs up)
+2. ORG SETUP ✓ DONE (manual — SQL Editor in Supabase dashboard)
 ────────────────────────────────────────────────────────────────────────────────
 
-[ ] Create org — firm name, slug
-[ ] Create first admin profile — linked to the org
-[ ] Seed script — pre-populate one org + one admin so the app
-    can be used immediately without a UI signup flow
+[x] Create org — firm name, slug
+[x] Create first admin profile — linked to the org
+[x] Seed script — seeded manually via Supabase SQL Editor
 
 
 ────────────────────────────────────────────────────────────────────────────────
-3. USER MANAGEMENT
+3. USER MANAGEMENT ✓ DONE
 ────────────────────────────────────────────────────────────────────────────────
 
-[ ] List all team members in the org
-[ ] Invite a new user — sends email invite, creates auth user + profile in
+[x] List all team members in the org
+[x] Invite a new user — sends email invite, creates auth user + profile in
     one step (if profile creation fails, auth user is cleaned up)
-[ ] Update user — full name, role, admin status
-[ ] Deactivate user — soft delete only (is_active = false), never hard delete
-[ ] Grant / revoke attendance permission (can_mark_attendance flag)
-[ ] Prevent admin from removing their own admin status if they are the last admin
+[x] Update user — full name, admin status, attendance permission
+[x] Deactivate user — soft delete only (is_active = false), never hard delete
+[x] Grant / revoke attendance permission (can_mark_attendance flag)
+[x] Prevent admin from removing their own admin status if they are the last admin
 
 
 ────────────────────────────────────────────────────────────────────────────────
-4. ROLES
+4. ROLES ✓ DONE
 ────────────────────────────────────────────────────────────────────────────────
 
-[ ] Create role — name + colour (e.g. Partner, Manager, Article Assistant)
-[ ] List roles
-[ ] Edit role — name, colour
-[ ] Delete role — only if no active users have this role
-[ ] Assign role to a user (done via update user above)
+[x] Create role — name + colour (e.g. Partner, Manager, Article Assistant)
+[x] List roles
+[x] Edit role — name, colour
+[x] Delete role — only if no active users have this role
+[x] Assign role to a user (dropdown in Users table)
 
 
 ────────────────────────────────────────────────────────────────────────────────
-5. REPORTING STRUCTURE (who reports to whom)
+5. REPORTING STRUCTURE ✓ DONE
 ────────────────────────────────────────────────────────────────────────────────
 
-[ ] Set reporting relationship — person A reports to person B
+[x] Set reporting relationship — person A reports to person B
     (many-to-many: one person can report to multiple managers,
     one manager can have multiple reports)
-[ ] Remove a reporting relationship
-[ ] View reporting structure — list showing each person and their managers
-[ ] View who reports to me — for a manager to see their direct reports
-[ ] Recursive lookup — find everyone who reports to me directly OR indirectly
-    (needed for task assignment: a manager can only assign to people below them)
+[x] Remove a reporting relationship
+[x] View reporting structure — list view showing each person and their managers
+[x] Graph view — React Flow + dagre auto-layout, draggable nodes, minimap
+[x] Circular loop detection — recursive CTE prevents A→B→A cycles
+[x] Recursive lookup — getSubtree() returns all reports at any depth
+    (used later in task assignment)
 
 
 ────────────────────────────────────────────────────────────────────────────────
-6. CLIENTS
+6. CLIENTS ✓ DONE
 ────────────────────────────────────────────────────────────────────────────────
 
-[ ] Add client — name, PAN, GSTIN, contact email, contact phone
-[ ] List all active clients
-[ ] Edit client details
-[ ] Deactivate client — soft delete (is_active = false)
-[ ] Search / filter clients by name
+[x] Add client — name, PAN, GSTIN, contact email, contact phone
+[x] List all active clients
+[x] Edit client details — inline edit modal, same form reused
+[x] Deactivate client — soft delete (is_active = false)
+[x] Search / filter clients by name, PAN, GSTIN (TanStack Table global filter)
 
 
 ────────────────────────────────────────────────────────────────────────────────
-7. TASKS — CORE
+7. TASKS — CORE ✓ DONE
 ────────────────────────────────────────────────────────────────────────────────
 
-[ ] Create task — title, type (GST/TDS/Income Tax/Audit/ROC/Accounting/
+[x] Create task — title, type (GST/TDS/Income Tax/Audit/ROC/Accounting/
     Payroll/Notice/Advisory/Other), priority (urgent/high/medium/low),
     due date, assignee, client (optional), financial year (optional),
     open pool toggle
-[ ] List my tasks — tasks where the current user is creator or assignee
+[x] List my tasks — tasks where the current user is creator or assignee
     with filters: status, type, priority, assignee
-[ ] View task detail — all fields + who has access
-[ ] Edit task — title, description, priority, due date, assignee (owner only)
-[ ] Soft delete task — is_active = false (owner only)
+[x] View task detail — all fields + who has access
+[x] Edit task — title, description, priority, due date, assignee (owner only)
+[x] Soft delete task — is_active = false (owner only)
 
 
 ────────────────────────────────────────────────────────────────────────────────
-8. TASKS — STATUS WORKFLOW
+8. TASKS — STATUS WORKFLOW ✓ DONE
 ────────────────────────────────────────────────────────────────────────────────
 
-[ ] Status transitions — enforce this exact sequence:
+[x] Status transitions — enforce this exact sequence:
     not_started → in_progress → under_review → changes_requested
     changes_requested → in_progress  (loop back)
     under_review → approved → filed → completed
     Completed tasks are immutable — no further changes allowed
-[ ] Block invalid transitions — e.g. cannot jump from not_started to completed
-[ ] Block all edits on completed tasks
+[x] Block invalid transitions — e.g. cannot jump from not_started to completed
+[x] Block all edits on completed tasks
 
 
 ────────────────────────────────────────────────────────────────────────────────
-9. TASKS — ACCESS CONTROL
+9. TASKS — ACCESS CONTROL ✓ DONE
 ────────────────────────────────────────────────────────────────────────────────
 
-[ ] task_access table — creator gets owner, assignee gets editor on creation
-[ ] Three access levels: owner (full control), editor (status + chat),
+[x] task_access table — creator gets owner, assignee gets editor on creation
+[x] Three access levels: owner (full control), editor (status + chat),
     viewer (read + chat)
-[ ] Grant access — task owner can give editor or viewer access to any org member
-[ ] Open pool — tasks marked is_open_pool = true are visible to ALL org members
-[ ] Claim pool task — any org member can self-assign an open pool task
+[x] Grant access — task owner can give editor or viewer access to any org member
+[x] Open pool — tasks marked is_open_pool = true are visible to ALL org members
+[x] Claim pool task — any org member can self-assign an open pool task
 
 
 ────────────────────────────────────────────────────────────────────────────────
-10. TASKS — AUDIT LOG
+10. TASKS — AUDIT LOG ✓ DONE
 ────────────────────────────────────────────────────────────────────────────────
 
-[ ] Auto-log on task created
-[ ] Auto-log on status changed (record old and new status)
-[ ] Auto-log on task reassigned (record old and new assignee)
-[ ] Auto-log on access granted
-[ ] Auto-log on comment added
-[ ] View audit log on task detail page — chronological, immutable timeline
-[ ] Audit log rows are INSERT-only — no UPDATE or DELETE ever, enforced at DB level
+[x] Auto-log on task created
+[x] Auto-log on status changed (record old and new status)
+[x] Auto-log on task reassigned (record old and new assignee)
+[x] Auto-log on access granted
+[x] Auto-log on comment added
+[x] View audit log on task detail page — chronological, immutable timeline
+[x] Audit log rows are INSERT-only — no UPDATE or DELETE ever, enforced at DB level
 
 
 ────────────────────────────────────────────────────────────────────────────────

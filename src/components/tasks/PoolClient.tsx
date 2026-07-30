@@ -1,83 +1,108 @@
 'use client';
 
 import { useState, useTransition } from 'react';
-import { toast } from 'sonner';
-import { Button } from '@/components/ui/button';
-import { claimPoolTask } from '@/actions/tasks';
-import { TaskTypeChip } from './TaskTypeChip';
-import { PriorityBadge } from './PriorityBadge';
-import { format } from 'date-fns';
 import { useRouter } from 'next/navigation';
-import type { TaskWithRelations } from '@/types';
+import Link from 'next/link';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { StatusBadge } from './StatusBadge';
+import { PriorityBadge } from './PriorityBadge';
+import { TaskTypeChip } from './TaskTypeChip';
+import { claimPoolTask } from '@/actions/tasks';
+import type { TaskListItem } from '@/types';
 
 interface Props {
-  initialTasks: TaskWithRelations[];
+  tasks: TaskListItem[];
 }
 
-export function PoolClient({ initialTasks }: Props) {
-  const [tasks, setTasks] = useState(initialTasks);
-  const [claiming, setClaiming] = useState<string | null>(null);
-  const [, startTransition] = useTransition();
+export function PoolClient({ tasks }: Props) {
   const router = useRouter();
+  const [filter, setFilter]           = useState('');
+  const [isPending, startTransition]  = useTransition();
 
-  async function handleClaim(id: string) {
-    setClaiming(id);
-    try {
-      const result = await claimPoolTask(id);
-      if ('error' in result) {
-        toast.error(result.error);
-        return;
-      }
-      setTasks((prev) => prev.filter((t) => t.id !== id));
-      toast.success('Task claimed — it is now yours');
-      startTransition(() => router.push(`/dashboard/tasks/${id}`));
-    } catch {
-      toast.error('Failed to claim task');
-    } finally {
-      setClaiming(null);
-    }
-  }
+  const filtered = tasks.filter((t) =>
+    t.title.toLowerCase().includes(filter.toLowerCase()) ||
+    (t.client?.name ?? '').toLowerCase().includes(filter.toLowerCase())
+  );
 
-  if (tasks.length === 0) {
-    return (
-      <div className="rounded-lg border border-dashed p-12 text-center">
-        <p className="text-base font-medium">No tasks in the pool</p>
-        <p className="text-sm text-muted-foreground mt-1">
-          All tasks have been claimed or assigned. Check back later.
-        </p>
-      </div>
-    );
+  function claim(taskId: string) {
+    startTransition(async () => {
+      const res = await claimPoolTask(taskId);
+      if ('error' in res) { alert(res.error); return; }
+      router.refresh();
+    });
   }
 
   return (
-    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-      {tasks.map((task) => (
-        <div key={task.id} className="rounded-lg border bg-card p-4 space-y-3">
-          <div className="flex items-start justify-between gap-2">
-            <p className="font-medium leading-snug">{task.title}</p>
-            <PriorityBadge priority={task.priority} />
-          </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <TaskTypeChip type={task.task_type} />
-            {task.client && (
-              <span className="text-xs text-muted-foreground">{task.client.name}</span>
-            )}
-          </div>
-          {task.due_at && (
-            <p className="text-xs text-muted-foreground">
-              Due {format(new Date(task.due_at), 'dd MMM yyyy')}
-            </p>
-          )}
-          <Button
-            size="sm"
-            className="w-full min-h-[44px]"
-            disabled={claiming === task.id}
-            onClick={() => handleClaim(task.id)}
-          >
-            {claiming === task.id ? 'Claiming…' : 'Claim Task'}
-          </Button>
+    <div className="space-y-4">
+      <div>
+        <h1 className="text-2xl font-semibold">Open Task Pool</h1>
+        <p className="text-sm text-muted-foreground mt-1">
+          Tasks available for any team member to claim.
+        </p>
+      </div>
+
+      <Input
+        placeholder="Filter by title or client…"
+        value={filter}
+        onChange={(e) => setFilter(e.target.value)}
+        className="max-w-xs"
+      />
+
+      {filtered.length === 0 ? (
+        <div className="rounded-md border p-8 text-center text-muted-foreground">
+          No open tasks available.
         </div>
-      ))}
+      ) : (
+        <ul className="space-y-3">
+          {filtered.map((task) => {
+            const alreadyClaimed = task.my_access !== null;
+            const isPast = task.due_at && new Date(task.due_at) < new Date();
+
+            return (
+              <li
+                key={task.id}
+                className="rounded-md border p-4 flex items-start justify-between gap-4"
+              >
+                <div className="space-y-1 min-w-0">
+                  <Link
+                    href={`/dashboard/tasks/${task.id}`}
+                    className="font-medium text-primary hover:underline line-clamp-1"
+                  >
+                    {task.title}
+                  </Link>
+                  <div className="flex flex-wrap gap-1.5">
+                    <TaskTypeChip type={task.type} />
+                    <StatusBadge status={task.status} />
+                    <PriorityBadge priority={task.priority} />
+                  </div>
+                  <div className="text-xs text-muted-foreground flex gap-3 mt-1">
+                    {task.client && <span>Client: {task.client.name}</span>}
+                    {task.due_at && (
+                      <span className={isPast ? 'text-red-600 font-medium' : ''}>
+                        Due:{' '}
+                        {new Date(task.due_at).toLocaleDateString('en-IN', {
+                          day: '2-digit', month: 'short', year: 'numeric',
+                        })}
+                      </span>
+                    )}
+                    {task.assignee && <span>Assignee: {task.assignee.full_name}</span>}
+                  </div>
+                </div>
+
+                <Button
+                  size="sm"
+                  variant={alreadyClaimed ? 'outline' : 'default'}
+                  disabled={isPending || alreadyClaimed}
+                  onClick={() => claim(task.id)}
+                >
+                  {alreadyClaimed ? 'Claimed' : 'Claim'}
+                </Button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }
