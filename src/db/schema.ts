@@ -200,6 +200,30 @@ export const task_audit_log = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// task_messages
+//
+// Chat messages on a task. Any user with task_access (any level) can send.
+// INSERT-only — messages are never edited or deleted (audit trail).
+// Supabase Realtime CDC listens to this table for live updates.
+// ---------------------------------------------------------------------------
+
+export const task_messages = pgTable(
+  'task_messages',
+  {
+    id:         uuid('id').primaryKey().defaultRandom(),
+    task_id:    uuid('task_id').notNull().references(() => tasks.id),
+    org_id:     uuid('org_id').notNull().references(() => orgs.id),
+    sender_id:  uuid('sender_id').notNull().references(() => profiles.id),
+    body:       text('body').notNull(),
+    created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('messages_task_idx').on(table.task_id),
+    index('messages_org_idx').on(table.org_id),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // reporting_relationships
 // ---------------------------------------------------------------------------
 

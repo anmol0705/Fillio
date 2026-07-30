@@ -6,11 +6,12 @@ import { and, desc, eq, inArray, isNull, or } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 
 import { db } from '@/db';
-import { tasks, task_access, task_audit_log, profiles, clients } from '@/db/schema';
+import { tasks, task_access, task_audit_log, task_messages, profiles, clients } from '@/db/schema';
 import { getCurrentUser } from '@/lib/auth/getUser';
 import type {
   Profile, TaskListItem, TaskDetail,
   TaskType, TaskStatus, TaskPriority, AccessLevel,
+  TaskMessageWithSender,
 } from '@/types';
 
 // ---------------------------------------------------------------------------
@@ -622,4 +623,103 @@ export async function claimPoolTask(
   });
 
   return { data: 'ok' };
+}
+
+// ---------------------------------------------------------------------------
+// getTaskMessages — load full message history for a task (server-side initial
+// load; Realtime handles incremental updates after that)
+// ---------------------------------------------------------------------------
+
+export async function getTaskMessages(taskId: string): Promise<
+  { error: string; data: null } | { error: null; data: TaskMessageWithSender[] }
+> {
+  if (!z.string().uuid().safeParse(taskId).success) {
+    return { error: 'Invalid task ID', data: null };
+  }
+
+  const result = await requireOrgMember();
+  if (!result.ok) return { error: result.error, data: null };
+
+  const task = await db.query.tasks.findFirst({
+    where: (t, { and, eq }) =>
+      and(eq(t.id, taskId), eq(t.org_id, result.profile.org_id), eq(t.is_active, true)),
+    columns: { id: true, is_open_pool: true },
+  });
+  if (!task) return { error: 'Task not found', data: null };
+
+  const myAccess = await getTaskAccess(taskId, result.profile.id);
+  if (!myAccess && !task.is_open_pool) return { error: 'Access denied', data: null };
+
+  const rows = await db.query.task_messages.findMany({
+    where: (m, { eq }) => eq(m.task_id, taskId),
+    orderBy: (m, { asc }) => [asc(m.created_at)],
+  });
+
+  if (rows.length === 0) return { error: null, data: [] };
+
+  const senderIds = [...new Set(rows.map((r) => r.sender_id))];
+  const senders   = await db.query.profiles.findMany({
+    where: (p, { inArray }) => inArray(p.id, senderIds),
+    columns: { id: true, full_name: true },
+  });
+  const senderMap = new Map(senders.map((s) => [s.id, s]));
+
+  const data: TaskMessageWithSender[] = rows.map((r) => ({
+    ...r,
+    sender: senderMap.get(r.sender_id) ?? { id: r.sender_id, full_name: 'Unknown' },
+  }));
+
+  return { error: null, data };
+}
+
+// ---------------------------------------------------------------------------
+// sendMessage — any user with any access level (or open pool) can send
+// ---------------------------------------------------------------------------
+
+export async function sendMessage(
+  taskId: string,
+  body:   string,
+): Promise<{ error: string } | { data: TaskMessageWithSender }> {
+  if (!z.string().uuid().safeParse(taskId).success) return { error: 'Invalid task ID' };
+
+  const trimmed = body.trim();
+  if (!trimmed)               return { error: 'Message cannot be empty' };
+  if (trimmed.length > 4000)  return { error: 'Message too long (max 4000 characters)' };
+
+  const result = await requireOrgMember();
+  if (!result.ok) return { error: result.error };
+
+  const task = await db.query.tasks.findFirst({
+    where: (t, { and, eq }) =>
+      and(eq(t.id, taskId), eq(t.org_id, result.profile.org_id), eq(t.is_active, true)),
+    columns: { id: true, is_open_pool: true, org_id: true },
+  });
+  if (!task) return { error: 'Task not found' };
+
+  const myAccess = await getTaskAccess(taskId, result.profile.id);
+  if (!myAccess && !task.is_open_pool) return { error: 'Access denied' };
+
+  const [msg] = await db
+    .insert(task_messages)
+    .values({
+      task_id:   taskId,
+      org_id:    task.org_id,
+      sender_id: result.profile.id,
+      body:      trimmed,
+    })
+    .returning();
+
+  await insertAuditLog({
+    task_id:  taskId,
+    org_id:   task.org_id,
+    actor_id: result.profile.id,
+    action:   'comment_added',
+  });
+
+  return {
+    data: {
+      ...msg,
+      sender: { id: result.profile.id, full_name: result.profile.full_name },
+    },
+  };
 }

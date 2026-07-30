@@ -1,7 +1,7 @@
 import type { InferSelectModel } from 'drizzle-orm';
 import type {
   orgs, roles, profiles, clients,
-  tasks, task_access, task_audit_log,
+  tasks, task_access, task_audit_log, task_messages,
   reporting_relationships, attendance_records,
 } from '@/db/schema';
 
@@ -12,6 +12,12 @@ export type Client                = InferSelectModel<typeof clients>;
 export type Task                  = InferSelectModel<typeof tasks>;
 export type TaskAccess            = InferSelectModel<typeof task_access>;
 export type TaskAuditLog          = InferSelectModel<typeof task_audit_log>;
+export type TaskMessage           = InferSelectModel<typeof task_messages>;
+
+// Shape used in the chat UI — message + sender name resolved
+export type TaskMessageWithSender = TaskMessage & {
+  sender: { id: string; full_name: string };
+};
 export type ReportingRelationship = InferSelectModel<typeof reporting_relationships>;
 export type AttendanceRecord      = InferSelectModel<typeof attendance_records>;
 
