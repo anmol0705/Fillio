@@ -26,7 +26,8 @@ export default async function TaskDetailPage({ params }: Props) {
     ? usersRes.data.map((u) => ({ id: u.id, full_name: u.full_name }))
     : [];
 
-  const messages = messagesRes.error === null ? messagesRes.data : [];
+  const messages      = messagesRes.error === null ? messagesRes.data : [];
+  const currentMember = members.find((m) => m.id === user.id);
 
   return (
     <div className="max-w-5xl mx-auto py-2 space-y-8">
@@ -37,7 +38,9 @@ export default async function TaskDetailPage({ params }: Props) {
         <TaskChat
           taskId={id}
           currentUserId={user.id}
+          currentUserName={currentMember?.full_name ?? 'You'}
           initialMessages={messages}
+          members={members}
         />
       </div>
     </div>

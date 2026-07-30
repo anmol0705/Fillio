@@ -130,14 +130,14 @@ Build in this exact order. Each section depends on the one above it.
 
 
 ────────────────────────────────────────────────────────────────────────────────
-11. TASKS — CHAT
+11. TASKS — CHAT ✓ DONE
 ────────────────────────────────────────────────────────────────────────────────
 
-[ ] Send a message on a task (any user with any access level can message)
-[ ] Load message history on task detail page (server-side on first load)
-[ ] Real-time updates — new messages from other users appear instantly
+[x] Send a message on a task (any user with any access level can message)
+[x] Load message history on task detail page (server-side on first load)
+[x] Real-time updates — new messages from other users appear instantly
     without page refresh (Supabase Realtime / WebSocket)
-[ ] Deduplicate — own sent message should not appear twice
+[x] Deduplicate — own sent message should not appear twice
     (once from server action, once from realtime echo)
 
 

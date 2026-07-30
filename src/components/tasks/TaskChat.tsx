@@ -6,13 +6,17 @@ import { sendMessage } from '@/actions/tasks';
 import type { TaskMessageWithSender } from '@/types';
 
 interface Props {
-  taskId:        string;
-  currentUserId: string;
+  taskId:          string;
+  currentUserId:   string;
+  currentUserName: string;
   initialMessages: TaskMessageWithSender[];
+  members:         { id: string; full_name: string }[];
 }
 
-export function TaskChat({ taskId, currentUserId, initialMessages }: Props) {
+export function TaskChat({ taskId, currentUserId, currentUserName, initialMessages, members }: Props) {
   const [messages, setMessages]    = useState<TaskMessageWithSender[]>(initialMessages);
+  // Build a lookup so Realtime messages from others resolve to real names
+  const memberMap = new Map(members.map((m) => [m.id, m.full_name]));
   const [body, setBody]            = useState('');
   const [error, setError]          = useState('');
   const [isPending, startTransition] = useTransition();
@@ -63,15 +67,14 @@ export function TaskChat({ taskId, currentUserId, initialMessages }: Props) {
             return;
           }
 
-          // Message from another user — append with a placeholder sender name.
-          // The full name isn't in the CDC payload, so we show a fallback until
-          // the user refreshes or opens a new session (acceptable for now).
+          // Resolve sender name from the members map loaded on mount
+          const senderName = memberMap.get(row.sender_id) ?? 'Team member';
           setMessages((prev) => [
             ...prev,
             {
               ...row,
               created_at: new Date(row.created_at),
-              sender: { id: row.sender_id, full_name: 'Team member' },
+              sender: { id: row.sender_id, full_name: senderName },
             },
           ]);
         },
@@ -94,11 +97,11 @@ export function TaskChat({ taskId, currentUserId, initialMessages }: Props) {
     const optimisticMsg: TaskMessageWithSender = {
       id:         crypto.randomUUID(),
       task_id:    taskId,
-      org_id:     '',           // not needed for rendering
+      org_id:     '',
       sender_id:  currentUserId,
       body:       body.trim(),
       created_at: new Date(),
-      sender:     { id: currentUserId, full_name: 'You' },
+      sender:     { id: currentUserId, full_name: currentUserName },
     };
 
     // Add to UI immediately so the sender doesn't wait for the server
@@ -121,7 +124,7 @@ export function TaskChat({ taskId, currentUserId, initialMessages }: Props) {
       setMessages((prev) =>
         prev.map((m) =>
           m.id === optimisticMsg.id
-            ? { ...res.data, sender: { id: currentUserId, full_name: 'You' } }
+            ? { ...res.data, sender: { id: currentUserId, full_name: currentUserName } }
             : m
         )
       );
