@@ -352,3 +352,68 @@ export async function getMonthlyAttendanceSummary(
     return { error: 'Failed to fetch monthly summary' };
   }
 }
+
+// ---------------------------------------------------------------------------
+// getMyAttendance — any authenticated user can view their own records
+// ---------------------------------------------------------------------------
+
+export type MyAttendanceRecord = {
+  date:   string;              // 'YYYY-MM-DD'
+  status: 'present' | 'absent' | 'half_day' | 'leave';
+  note:   string | null;
+};
+
+export type MyAttendanceSummary = {
+  records:    MyAttendanceRecord[];
+  present:    number;
+  absent:     number;
+  half_day:   number;
+  leave:      number;
+  total_days: number;
+};
+
+export async function getMyAttendance(
+  year: number,
+  month: number,
+): Promise<{ data: MyAttendanceSummary } | { error: string }> {
+  const user = await getCurrentUser();
+  if (!user) return { error: 'Unauthorized' };
+
+  const parsed = z.object({
+    year:  z.number().int().min(2020).max(2100),
+    month: z.number().int().min(1).max(12),
+  }).safeParse({ year, month });
+  if (!parsed.success) return { error: 'Invalid year or month' };
+
+  const mm        = String(parsed.data.month).padStart(2, '0');
+  const startDate = `${parsed.data.year}-${mm}-01`;
+  const nextMonth = parsed.data.month === 12 ? 1 : parsed.data.month + 1;
+  const nextYear  = parsed.data.month === 12 ? parsed.data.year + 1 : parsed.data.year;
+  const endDate   = `${nextYear}-${String(nextMonth).padStart(2, '0')}-01`;
+
+  const rows = await db
+    .select({
+      date:   attendance_records.date,
+      status: attendance_records.status,
+      note:   attendance_records.note,
+    })
+    .from(attendance_records)
+    .where(
+      and(
+        eq(attendance_records.user_id, user.id),
+        gte(attendance_records.date, startDate),
+        lt(attendance_records.date, endDate),
+      ),
+    )
+    .orderBy(attendance_records.date);
+
+  const summary = { present: 0, absent: 0, half_day: 0, leave: 0, total_days: rows.length };
+  for (const r of rows) {
+    if (r.status === 'present')  summary.present  += 1;
+    if (r.status === 'absent')   summary.absent   += 1;
+    if (r.status === 'half_day') summary.half_day += 1;
+    if (r.status === 'leave')    summary.leave    += 1;
+  }
+
+  return { data: { records: rows, ...summary } };
+}

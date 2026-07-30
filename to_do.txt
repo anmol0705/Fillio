@@ -154,7 +154,7 @@ Build in this exact order. Each section depends on the one above it.
     for a given month and year
 [x] Permission — only org admin OR users with can_mark_attendance flag can
     mark attendance (regular users cannot)
-[ ] View own attendance — any user can see their own records
+[x] View own attendance — any user can see their own records
 
 
 ────────────────────────────────────────────────────────────────────────────────
