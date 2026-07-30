@@ -180,18 +180,18 @@ Build in this exact order. Each section depends on the one above it.
 
 
 ────────────────────────────────────────────────────────────────────────────────
-14. NOTIFICATIONS
+14. NOTIFICATIONS ✓ DONE
 ────────────────────────────────────────────────────────────────────────────────
 
-[ ] Create notification when a task is assigned to someone
-[ ] Create notification when a task is submitted for review (notifies creator)
-[ ] Create notification when a task is reassigned to someone new
-[ ] Notification bell in header — shows unread count badge
-[ ] Real-time bell — new notifications appear instantly without page refresh
-[ ] Mark one notification as read
-[ ] Mark all notifications as read
-[ ] Notifications are INSERT-only — created by server actions via service role,
-    never by the user directly
+[x] Create notification when a task is assigned to someone
+[x] Create notification when a task is submitted for review (notifies creator)
+[x] Create notification when a task is reassigned to someone new
+[x] Notification bell in header — shows unread count badge
+[x] Real-time bell — Supabase Realtime CDC, new notifications appear instantly
+[x] Mark one notification as read (click to mark)
+[x] Mark all notifications as read
+[x] Notifications are INSERT-only — created via insertNotification() helper
+    using createAdminClient(), never by the user directly
 
 
 ────────────────────────────────────────────────────────────────────────────────

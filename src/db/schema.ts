@@ -52,6 +52,10 @@ export const eventType = pgEnum('event_type', [
   'meeting', 'deadline', 'other',
 ]);
 
+export const notificationType = pgEnum('notification_type', [
+  'task_assigned', 'task_reassigned', 'task_under_review',
+]);
+
 // ---------------------------------------------------------------------------
 // orgs
 // ---------------------------------------------------------------------------
@@ -299,6 +303,33 @@ export const recurring_templates = pgTable(
     updated_at:               timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [index('recurring_org_id_idx').on(table.org_id)],
+);
+
+// ---------------------------------------------------------------------------
+// notifications
+//
+// INSERT-only via createAdminClient() in server actions — never by the user.
+// User can SELECT own rows and UPDATE is_read only.
+// Supabase Realtime CDC on this table drives the bell badge in real time.
+// ---------------------------------------------------------------------------
+
+export const notifications = pgTable(
+  'notifications',
+  {
+    id:                uuid('id').primaryKey().defaultRandom(),
+    org_id:            uuid('org_id').notNull().references(() => orgs.id),
+    user_id:           uuid('user_id').notNull().references(() => profiles.id),
+    task_id:           uuid('task_id').references(() => tasks.id),
+    type:              notificationType('type').notNull(),
+    title:             text('title').notNull(),
+    body:              text('body'),
+    is_read:           boolean('is_read').notNull().default(false),
+    created_at:        timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('notifications_user_idx').on(table.user_id),
+    index('notifications_org_idx').on(table.org_id),
+  ],
 );
 
 // ---------------------------------------------------------------------------

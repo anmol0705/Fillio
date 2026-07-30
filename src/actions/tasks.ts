@@ -8,6 +8,7 @@ import { alias } from 'drizzle-orm/pg-core';
 import { db } from '@/db';
 import { tasks, task_access, task_audit_log, task_messages, profiles, clients } from '@/db/schema';
 import { getCurrentUser } from '@/lib/auth/getUser';
+import { insertNotification } from '@/actions/notifications';
 import type {
   Profile, TaskListItem, TaskDetail,
   TaskType, TaskStatus, TaskPriority, AccessLevel,
@@ -383,6 +384,17 @@ export async function createTask(
     payload:  { title: parsed.data.title },
   });
 
+  if (assigneeId && assigneeId !== creatorId) {
+    void insertNotification({
+      org_id:  orgId,
+      user_id: assigneeId,
+      task_id: task.id,
+      type:    'task_assigned',
+      title:   'New task assigned to you',
+      body:    parsed.data.title,
+    });
+  }
+
   return { data: { id: task.id } };
 }
 
@@ -431,13 +443,21 @@ export async function updateTask(
     .set({ ...rest, due_at: due_at !== undefined ? (due_at ? new Date(due_at) : null) : undefined, updated_at: new Date() })
     .where(eq(tasks.id, taskId));
 
-  // If assignee changed, update task_access
+  // If assignee changed, update task_access and notify new assignee
   if (newAssigneeId !== undefined && newAssigneeId !== prevAssigneeId) {
     if (newAssigneeId && newAssigneeId !== result.profile.id) {
       await db
         .insert(task_access)
         .values({ task_id: taskId, user_id: newAssigneeId, level: 'editor', granted_by: result.profile.id })
         .onConflictDoNothing();
+      void insertNotification({
+        org_id:  result.profile.org_id,
+        user_id: newAssigneeId,
+        task_id: taskId,
+        type:    'task_reassigned',
+        title:   'Task reassigned to you',
+        body:    parsed.data.title ?? undefined,
+      });
     }
     await insertAuditLog({
       task_id:  taskId,
@@ -476,7 +496,7 @@ export async function updateTaskStatus(
 
   const task = await db.query.tasks.findFirst({
     where: (t, { eq }) => eq(t.id, taskId),
-    columns: { status: true, org_id: true },
+    columns: { status: true, org_id: true, creator_id: true, title: true },
   });
   if (!task) return { error: 'Task not found' };
   if (task.status === 'completed') return { error: 'Completed tasks are immutable' };
@@ -495,6 +515,18 @@ export async function updateTaskStatus(
     action:   'status_changed',
     payload:  { from: task.status, to: newStatus },
   });
+
+  // Notify creator when assignee submits for review (and they are not the same person)
+  if (newStatus === 'under_review' && task.creator_id !== result.profile.id) {
+    void insertNotification({
+      org_id:  task.org_id,
+      user_id: task.creator_id,
+      task_id: taskId,
+      type:    'task_under_review',
+      title:   'Task submitted for review',
+      body:    task.title,
+    });
+  }
 
   return { data: 'ok' };
 }

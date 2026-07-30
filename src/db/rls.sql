@@ -414,6 +414,27 @@ CREATE POLICY "recurring: admin can delete"
 
 
 -- =============================================================================
+-- NOTIFICATIONS
+-- Users can read and mark-read their own notifications only.
+-- INSERT is service-role only (createAdminClient in server actions).
+-- Supabase Realtime CDC on this table drives the bell in real time.
+-- =============================================================================
+
+ALTER TABLE notifications ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "notifications: user can read own" ON notifications;
+CREATE POLICY "notifications: user can read own"
+  ON notifications FOR SELECT
+  USING (user_id = auth.uid() AND org_id = get_my_org_id());
+
+DROP POLICY IF EXISTS "notifications: user can mark read" ON notifications;
+CREATE POLICY "notifications: user can mark read"
+  ON notifications FOR UPDATE
+  USING (user_id = auth.uid() AND org_id = get_my_org_id())
+  WITH CHECK (user_id = auth.uid() AND org_id = get_my_org_id());
+
+
+-- =============================================================================
 -- CALENDAR_EVENTS
 -- A user can see an event if they created it OR it was assigned to them.
 -- Admins can see all events in their org.

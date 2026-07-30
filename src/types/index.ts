@@ -3,7 +3,7 @@ import type {
   orgs, roles, profiles, clients,
   tasks, task_access, task_audit_log, task_messages,
   reporting_relationships, attendance_records, recurring_templates,
-  calendar_events,
+  calendar_events, notifications,
 } from '@/db/schema';
 
 export type Org                   = InferSelectModel<typeof orgs>;
@@ -64,14 +64,4 @@ export type CalendarEventWithNames = CalendarEvent & {
   task:     { id: string; title: string } | null;
 };
 
-// Stub — notifications table not built yet
-export type Notification = {
-  id:         string;
-  org_id:     string;
-  user_id:    string;
-  task_id:    string | null;
-  title:      string;
-  body:       string | null;
-  is_read:    boolean;
-  created_at: Date;
-};
+export type Notification = InferSelectModel<typeof notifications>;
