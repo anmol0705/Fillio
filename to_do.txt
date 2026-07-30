@@ -195,17 +195,17 @@ Build in this exact order. Each section depends on the one above it.
 
 
 ────────────────────────────────────────────────────────────────────────────────
-15. DASHBOARD (accountability view — the founding partner's screen)
+15. DASHBOARD ✓ DONE (accountability view — the founding partner's screen)
 ────────────────────────────────────────────────────────────────────────────────
 
-[ ] Total active tasks count
-[ ] Overdue tasks count (due_at is in the past, status not completed)
-[ ] Tasks due this week count
-[ ] Completed this month count
-[ ] Overdue tasks table — every overdue task with assignee name, client name,
+[x] Total active tasks count
+[x] Overdue tasks count (due_at is in the past, status not completed)
+[x] Tasks due this week count
+[x] Completed this month count
+[x] Overdue tasks table — every overdue task with assignee name, client name,
     due date, how many days overdue — sorted by most overdue first
-[ ] Workload chart — bar chart showing open task count per team member
-[ ] Deadline calendar — month view showing which tasks are due on which days
+[x] Workload chart — bar chart showing open task count per team member
+[x] Deadline calendar — month view showing which tasks are due on which days
 
 
 ────────────────────────────────────────────────────────────────────────────────
