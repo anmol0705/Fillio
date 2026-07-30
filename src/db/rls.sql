@@ -1,265 +1,490 @@
--- ============================================================
--- FILIO RLS POLICIES
--- Run this entire file in Supabase SQL Editor
--- Idempotent: DROP POLICY IF EXISTS before every CREATE POLICY
--- ============================================================
+-- =============================================================================
+-- FILIO — Row Level Security
+-- Run this entire file once in Supabase SQL Editor.
+-- Re-running is safe — DROP POLICY IF EXISTS + CREATE handles idempotency.
+-- =============================================================================
 
--- ============================================================
--- HELPER FUNCTIONS (SECURITY DEFINER SET search_path = public)
--- ============================================================
 
-CREATE OR REPLACE FUNCTION public.get_my_org_id()
+-- -----------------------------------------------------------------------------
+-- HELPER FUNCTIONS
+-- These run as SECURITY DEFINER so they can read auth.users safely.
+-- SET search_path = public prevents search-path hijacking attacks.
+-- -----------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION get_my_org_id()
 RETURNS uuid
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
 AS $$
-  SELECT org_id FROM public.profiles WHERE id = auth.uid()
+  SELECT org_id FROM profiles WHERE id = auth.uid();
 $$;
 
-CREATE OR REPLACE FUNCTION public.is_org_admin()
+CREATE OR REPLACE FUNCTION is_org_admin()
 RETURNS boolean
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
 AS $$
   SELECT COALESCE(
-    (SELECT is_org_admin FROM public.profiles WHERE id = auth.uid()),
+    (SELECT is_org_admin FROM profiles WHERE id = auth.uid()),
     false
-  )
-$$;
-
-CREATE OR REPLACE FUNCTION public.is_task_member(p_task_id uuid)
-RETURNS boolean
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public
-AS $$
-  SELECT EXISTS (
-    SELECT 1 FROM public.task_access
-    WHERE task_id = p_task_id AND user_id = auth.uid()
-  )
-$$;
-
-CREATE OR REPLACE FUNCTION public.is_attendance_manager()
-RETURNS boolean
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public
-AS $$
-  SELECT COALESCE(
-    (SELECT can_mark_attendance FROM public.profiles WHERE id = auth.uid()),
-    false
-  )
-$$;
-
-CREATE OR REPLACE FUNCTION public.is_task_owner(p_task_id uuid, p_user_id uuid)
-RETURNS boolean
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public
-AS $$
-  SELECT EXISTS (
-    SELECT 1 FROM public.task_access
-    WHERE task_id = p_task_id
-      AND user_id = p_user_id
-      AND access_level = 'owner'
-  )
-$$;
-
--- ============================================================
--- ENABLE RLS ON ALL 11 TABLES
--- ============================================================
-
-ALTER TABLE public.orgs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.roles ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.clients ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.tasks ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.task_access ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.task_messages ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.task_audit_log ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.recurring_templates ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.attendance_records ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.notifications ENABLE ROW LEVEL SECURITY;
-
--- ============================================================
--- ORGS
--- ============================================================
-
-DROP POLICY IF EXISTS "orgs_select_own" ON public.orgs;
-CREATE POLICY "orgs_select_own" ON public.orgs
-  FOR SELECT USING (id = get_my_org_id());
-
--- ============================================================
--- ROLES
--- ============================================================
-
-DROP POLICY IF EXISTS "roles_select_org" ON public.roles;
-CREATE POLICY "roles_select_org" ON public.roles
-  FOR SELECT USING (org_id = get_my_org_id());
-
-DROP POLICY IF EXISTS "roles_insert_admin" ON public.roles;
-CREATE POLICY "roles_insert_admin" ON public.roles
-  FOR INSERT WITH CHECK (org_id = get_my_org_id() AND is_org_admin());
-
-DROP POLICY IF EXISTS "roles_update_admin" ON public.roles;
-CREATE POLICY "roles_update_admin" ON public.roles
-  FOR UPDATE USING (org_id = get_my_org_id() AND is_org_admin());
-
-DROP POLICY IF EXISTS "roles_delete_admin" ON public.roles;
-CREATE POLICY "roles_delete_admin" ON public.roles
-  FOR DELETE USING (org_id = get_my_org_id() AND is_org_admin());
-
--- ============================================================
--- PROFILES
--- Users can read all profiles in their org.
--- Profile creation is via createAdminClient() (service role) only.
--- Service role bypasses RLS — no INSERT policy needed or wanted.
--- No DELETE policy — soft delete only (is_active = false via UPDATE).
--- ============================================================
-
-DROP POLICY IF EXISTS "profiles_select_org" ON public.profiles;
-CREATE POLICY "profiles_select_org" ON public.profiles
-  FOR SELECT USING (org_id = get_my_org_id());
-
-DROP POLICY IF EXISTS "profiles_update_own" ON public.profiles;
-CREATE POLICY "profiles_update_own" ON public.profiles
-  FOR UPDATE
-  USING (id = auth.uid())
-  WITH CHECK (
-    id = auth.uid()
-    AND is_org_admin = (SELECT is_org_admin FROM public.profiles WHERE id = auth.uid())
-    AND org_id = (SELECT org_id FROM public.profiles WHERE id = auth.uid())
-    AND is_active = (SELECT is_active FROM public.profiles WHERE id = auth.uid())
-    AND can_mark_attendance = (SELECT can_mark_attendance FROM public.profiles WHERE id = auth.uid())
   );
+$$;
 
--- ============================================================
+CREATE OR REPLACE FUNCTION is_task_member(task_id uuid)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM task_access
+    WHERE task_access.task_id = $1
+      AND task_access.user_id = auth.uid()
+  );
+$$;
+
+
+-- =============================================================================
+-- ENABLE RLS ON ALL TABLES
+-- =============================================================================
+
+ALTER TABLE orgs                    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE roles                   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE profiles                ENABLE ROW LEVEL SECURITY;
+ALTER TABLE clients                 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tasks                   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE task_access             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE task_audit_log          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE task_messages           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE reporting_relationships ENABLE ROW LEVEL SECURITY;
+ALTER TABLE attendance_records      ENABLE ROW LEVEL SECURITY;
+
+
+-- =============================================================================
+-- ORGS
+-- Any authenticated member can read their own org row.
+-- Only service role (createAdminClient) can insert/update orgs.
+-- =============================================================================
+
+DROP POLICY IF EXISTS "orgs: member can read own org" ON orgs;
+CREATE POLICY "orgs: member can read own org"
+  ON orgs FOR SELECT
+  USING (id = get_my_org_id());
+
+
+-- =============================================================================
+-- ROLES
+-- Any org member can read roles (needed for dropdowns).
+-- Only org admin can insert/update/delete.
+-- =============================================================================
+
+DROP POLICY IF EXISTS "roles: member can read own org roles" ON roles;
+CREATE POLICY "roles: member can read own org roles"
+  ON roles FOR SELECT
+  USING (org_id = get_my_org_id());
+
+DROP POLICY IF EXISTS "roles: admin can insert" ON roles;
+CREATE POLICY "roles: admin can insert"
+  ON roles FOR INSERT
+  WITH CHECK (org_id = get_my_org_id() AND is_org_admin());
+
+DROP POLICY IF EXISTS "roles: admin can update" ON roles;
+CREATE POLICY "roles: admin can update"
+  ON roles FOR UPDATE
+  USING (org_id = get_my_org_id() AND is_org_admin());
+
+DROP POLICY IF EXISTS "roles: admin can delete" ON roles;
+CREATE POLICY "roles: admin can delete"
+  ON roles FOR DELETE
+  USING (org_id = get_my_org_id() AND is_org_admin());
+
+
+-- =============================================================================
+-- PROFILES
+-- Members can read all profiles in their org (needed for assignee dropdowns).
+-- Members can update their own profile only.
+-- INSERT and privileged updates go through service role (createAdminClient).
+-- =============================================================================
+
+DROP POLICY IF EXISTS "profiles: member can read own org" ON profiles;
+CREATE POLICY "profiles: member can read own org"
+  ON profiles FOR SELECT
+  USING (org_id = get_my_org_id());
+
+DROP POLICY IF EXISTS "profiles: member can update own row" ON profiles;
+CREATE POLICY "profiles: member can update own row"
+  ON profiles FOR UPDATE
+  USING (id = auth.uid());
+
+
+-- =============================================================================
 -- CLIENTS
--- ============================================================
+-- All org members can read and write clients (not admin-only).
+-- =============================================================================
 
-DROP POLICY IF EXISTS "clients_select_org" ON public.clients;
-CREATE POLICY "clients_select_org" ON public.clients
-  FOR SELECT USING (org_id = get_my_org_id());
+DROP POLICY IF EXISTS "clients: member can read" ON clients;
+CREATE POLICY "clients: member can read"
+  ON clients FOR SELECT
+  USING (org_id = get_my_org_id());
 
-DROP POLICY IF EXISTS "clients_insert_admin" ON public.clients;
-CREATE POLICY "clients_insert_admin" ON public.clients
-  FOR INSERT WITH CHECK (org_id = get_my_org_id() AND is_org_admin());
+DROP POLICY IF EXISTS "clients: member can insert" ON clients;
+CREATE POLICY "clients: member can insert"
+  ON clients FOR INSERT
+  WITH CHECK (org_id = get_my_org_id());
 
-DROP POLICY IF EXISTS "clients_update_admin" ON public.clients;
-CREATE POLICY "clients_update_admin" ON public.clients
-  FOR UPDATE USING (org_id = get_my_org_id() AND is_org_admin());
+DROP POLICY IF EXISTS "clients: member can update" ON clients;
+CREATE POLICY "clients: member can update"
+  ON clients FOR UPDATE
+  USING (org_id = get_my_org_id());
 
--- Soft delete only — no DELETE policy on clients
 
--- ============================================================
+-- =============================================================================
 -- TASKS
--- SELECT: task member OR open pool task in same org
--- INSERT: any org member (org_id scoped)
--- UPDATE: task members only (no backward status transitions enforced here — app layer)
--- No DELETE — soft delete via is_active = false
--- ============================================================
+-- A user can see a task if:
+--   (a) they have a row in task_access for it, OR
+--   (b) the task is marked is_open_pool = true (visible to whole org)
+-- Both cases still require the task to belong to the user's org.
+-- =============================================================================
 
-DROP POLICY IF EXISTS "tasks_select_member" ON public.tasks;
-CREATE POLICY "tasks_select_member" ON public.tasks
-  FOR SELECT USING (
+DROP POLICY IF EXISTS "tasks: member can read accessible tasks" ON tasks;
+CREATE POLICY "tasks: member can read accessible tasks"
+  ON tasks FOR SELECT
+  USING (
     org_id = get_my_org_id()
+    AND is_active = true
     AND (
       is_open_pool = true
       OR is_task_member(id)
     )
   );
 
-DROP POLICY IF EXISTS "tasks_insert_org" ON public.tasks;
-CREATE POLICY "tasks_insert_org" ON public.tasks
-  FOR INSERT WITH CHECK (org_id = get_my_org_id());
+DROP POLICY IF EXISTS "tasks: member can insert" ON tasks;
+CREATE POLICY "tasks: member can insert"
+  ON tasks FOR INSERT
+  WITH CHECK (org_id = get_my_org_id());
 
-DROP POLICY IF EXISTS "tasks_update_member" ON public.tasks;
-CREATE POLICY "tasks_update_member" ON public.tasks
-  FOR UPDATE USING (
+-- UPDATE allowed if user has any access (owner-level check is in app layer)
+DROP POLICY IF EXISTS "tasks: member can update accessible tasks" ON tasks;
+CREATE POLICY "tasks: member can update accessible tasks"
+  ON tasks FOR UPDATE
+  USING (
     org_id = get_my_org_id()
-    AND is_task_member(id)
+    AND (is_open_pool = true OR is_task_member(id))
   );
 
--- ============================================================
+
+-- =============================================================================
 -- TASK_ACCESS
--- SELECT: any task member can see who else has access
--- INSERT/UPDATE/DELETE: handled by admin client (service role) only
--- No RLS INSERT/DELETE policies — admin client bypasses RLS
--- ============================================================
+-- Members can read access rows for tasks they themselves are on.
+-- Inserts go through service role (createAdminClient) in server actions.
+-- =============================================================================
 
-DROP POLICY IF EXISTS "task_access_select_member" ON public.task_access;
-CREATE POLICY "task_access_select_member" ON public.task_access
-  FOR SELECT USING (is_task_member(task_id));
+DROP POLICY IF EXISTS "task_access: member can read own access rows" ON task_access;
+CREATE POLICY "task_access: member can read own access rows"
+  ON task_access FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM tasks t
+      WHERE t.id = task_access.task_id
+        AND t.org_id = get_my_org_id()
+        AND (t.is_open_pool = true OR is_task_member(t.id))
+    )
+  );
 
--- ============================================================
+DROP POLICY IF EXISTS "task_access: member can insert" ON task_access;
+CREATE POLICY "task_access: member can insert"
+  ON task_access FOR INSERT
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM tasks t
+      WHERE t.id = task_access.task_id
+        AND t.org_id = get_my_org_id()
+    )
+  );
+
+DROP POLICY IF EXISTS "task_access: member can upsert" ON task_access;
+CREATE POLICY "task_access: member can upsert"
+  ON task_access FOR UPDATE
+  USING (
+    EXISTS (
+      SELECT 1 FROM tasks t
+      WHERE t.id = task_access.task_id
+        AND t.org_id = get_my_org_id()
+    )
+  );
+
+
+-- =============================================================================
+-- TASK_AUDIT_LOG
+-- INSERT-only via server actions. Members can read logs for tasks they can see.
+-- No UPDATE or DELETE policy — the table is immutable by design.
+-- =============================================================================
+
+DROP POLICY IF EXISTS "task_audit_log: member can read" ON task_audit_log;
+CREATE POLICY "task_audit_log: member can read"
+  ON task_audit_log FOR SELECT
+  USING (
+    org_id = get_my_org_id()
+    AND (
+      EXISTS (
+        SELECT 1 FROM tasks t
+        WHERE t.id = task_audit_log.task_id
+          AND (t.is_open_pool = true OR is_task_member(t.id))
+      )
+    )
+  );
+
+DROP POLICY IF EXISTS "task_audit_log: member can insert" ON task_audit_log;
+CREATE POLICY "task_audit_log: member can insert"
+  ON task_audit_log FOR INSERT
+  WITH CHECK (org_id = get_my_org_id());
+
+
+-- =============================================================================
 -- TASK_MESSAGES
--- ============================================================
+-- Any user who can see the task can read and send messages.
+-- =============================================================================
 
-DROP POLICY IF EXISTS "task_messages_select_member" ON public.task_messages;
-CREATE POLICY "task_messages_select_member" ON public.task_messages
-  FOR SELECT USING (is_task_member(task_id));
+DROP POLICY IF EXISTS "task_messages: member can read" ON task_messages;
+CREATE POLICY "task_messages: member can read"
+  ON task_messages FOR SELECT
+  USING (
+    org_id = get_my_org_id()
+    AND EXISTS (
+      SELECT 1 FROM tasks t
+      WHERE t.id = task_messages.task_id
+        AND (t.is_open_pool = true OR is_task_member(t.id))
+    )
+  );
 
-DROP POLICY IF EXISTS "task_messages_insert_member" ON public.task_messages;
-CREATE POLICY "task_messages_insert_member" ON public.task_messages
-  FOR INSERT WITH CHECK (
-    is_task_member(task_id)
+DROP POLICY IF EXISTS "task_messages: member can insert" ON task_messages;
+CREATE POLICY "task_messages: member can insert"
+  ON task_messages FOR INSERT
+  WITH CHECK (
+    org_id = get_my_org_id()
     AND sender_id = auth.uid()
+    AND EXISTS (
+      SELECT 1 FROM tasks t
+      WHERE t.id = task_messages.task_id
+        AND (t.is_open_pool = true OR is_task_member(t.id))
+    )
   );
 
--- ============================================================
--- TASK_AUDIT_LOG (immutable — SELECT via RLS, inserts via admin client only)
--- NO INSERT, UPDATE, or DELETE policies. Ever.
--- ============================================================
 
-DROP POLICY IF EXISTS "task_audit_log_select_member" ON public.task_audit_log;
-CREATE POLICY "task_audit_log_select_member" ON public.task_audit_log
-  FOR SELECT USING (is_task_member(task_id));
+-- =============================================================================
+-- REPORTING_RELATIONSHIPS
+-- All org members can read the reporting structure.
+-- Only admins can modify it.
+-- =============================================================================
 
--- ============================================================
--- RECURRING_TEMPLATES
--- ============================================================
+DROP POLICY IF EXISTS "reporting: member can read" ON reporting_relationships;
+CREATE POLICY "reporting: member can read"
+  ON reporting_relationships FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM profiles p
+      WHERE p.id = reporting_relationships.manager_id
+        AND p.org_id = get_my_org_id()
+    )
+  );
 
-DROP POLICY IF EXISTS "recurring_templates_select_org" ON public.recurring_templates;
-CREATE POLICY "recurring_templates_select_org" ON public.recurring_templates
-  FOR SELECT USING (org_id = get_my_org_id());
+DROP POLICY IF EXISTS "reporting: admin can insert" ON reporting_relationships;
+CREATE POLICY "reporting: admin can insert"
+  ON reporting_relationships FOR INSERT
+  WITH CHECK (
+    is_org_admin()
+    AND EXISTS (
+      SELECT 1 FROM profiles p
+      WHERE p.id = reporting_relationships.manager_id
+        AND p.org_id = get_my_org_id()
+    )
+  );
 
-DROP POLICY IF EXISTS "recurring_templates_insert_admin" ON public.recurring_templates;
-CREATE POLICY "recurring_templates_insert_admin" ON public.recurring_templates
-  FOR INSERT WITH CHECK (org_id = get_my_org_id() AND is_org_admin());
+DROP POLICY IF EXISTS "reporting: admin can delete" ON reporting_relationships;
+CREATE POLICY "reporting: admin can delete"
+  ON reporting_relationships FOR DELETE
+  USING (
+    is_org_admin()
+    AND EXISTS (
+      SELECT 1 FROM profiles p
+      WHERE p.id = reporting_relationships.manager_id
+        AND p.org_id = get_my_org_id()
+    )
+  );
 
-DROP POLICY IF EXISTS "recurring_templates_update_admin" ON public.recurring_templates;
-CREATE POLICY "recurring_templates_update_admin" ON public.recurring_templates
-  FOR UPDATE USING (org_id = get_my_org_id() AND is_org_admin());
 
--- ============================================================
+-- =============================================================================
 -- ATTENDANCE_RECORDS
--- ============================================================
+-- Admins and attendance managers can read all records for their org.
+-- Regular members can only read their own records.
+-- Inserts/updates go through server actions which check permissions.
+-- =============================================================================
 
-DROP POLICY IF EXISTS "attendance_select_org_admin" ON public.attendance_records;
-DROP POLICY IF EXISTS "attendance_select_manager" ON public.attendance_records;
-CREATE POLICY "attendance_select_manager" ON public.attendance_records
-  FOR SELECT USING (
+DROP POLICY IF EXISTS "attendance: admin or manager can read all" ON attendance_records;
+CREATE POLICY "attendance: admin or manager can read all"
+  ON attendance_records FOR SELECT
+  USING (
     org_id = get_my_org_id()
-    AND (user_id = auth.uid() OR is_org_admin() OR is_attendance_manager())
+    AND (
+      is_org_admin()
+      OR (SELECT can_mark_attendance FROM profiles WHERE id = auth.uid())
+      OR user_id = auth.uid()
+    )
   );
 
-DROP POLICY IF EXISTS "attendance_insert_admin" ON public.attendance_records;
-DROP POLICY IF EXISTS "attendance_insert_manager" ON public.attendance_records;
-CREATE POLICY "attendance_insert_manager" ON public.attendance_records
-  FOR INSERT WITH CHECK (
+DROP POLICY IF EXISTS "attendance: admin or manager can insert" ON attendance_records;
+CREATE POLICY "attendance: admin or manager can insert"
+  ON attendance_records FOR INSERT
+  WITH CHECK (
     org_id = get_my_org_id()
-    AND (is_org_admin() OR is_attendance_manager())
+    AND (
+      is_org_admin()
+      OR (SELECT can_mark_attendance FROM profiles WHERE id = auth.uid())
+    )
   );
 
-DROP POLICY IF EXISTS "attendance_update_admin" ON public.attendance_records;
-DROP POLICY IF EXISTS "attendance_update_manager" ON public.attendance_records;
-CREATE POLICY "attendance_update_manager" ON public.attendance_records
-  FOR UPDATE USING (
+DROP POLICY IF EXISTS "attendance: admin or manager can update" ON attendance_records;
+CREATE POLICY "attendance: admin or manager can update"
+  ON attendance_records FOR UPDATE
+  USING (
     org_id = get_my_org_id()
-    AND (is_org_admin() OR is_attendance_manager())
+    AND (
+      is_org_admin()
+      OR (SELECT can_mark_attendance FROM profiles WHERE id = auth.uid())
+    )
   );
 
--- ============================================================
+
+-- =============================================================================
+-- RECURRING_TEMPLATES
+-- Only org admins can read and manage templates.
+-- Cron job uses service role (bypasses RLS entirely).
+-- =============================================================================
+
+ALTER TABLE recurring_templates ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "recurring: admin can read" ON recurring_templates;
+CREATE POLICY "recurring: admin can read"
+  ON recurring_templates FOR SELECT
+  USING (org_id = get_my_org_id() AND is_org_admin());
+
+DROP POLICY IF EXISTS "recurring: admin can insert" ON recurring_templates;
+CREATE POLICY "recurring: admin can insert"
+  ON recurring_templates FOR INSERT
+  WITH CHECK (org_id = get_my_org_id() AND is_org_admin());
+
+DROP POLICY IF EXISTS "recurring: admin can update" ON recurring_templates;
+CREATE POLICY "recurring: admin can update"
+  ON recurring_templates FOR UPDATE
+  USING (org_id = get_my_org_id() AND is_org_admin());
+
+
+-- =============================================================================
+-- RECURRING_TEMPLATES
+-- Only org admins can read and manage templates.
+-- Cron job uses service role — bypasses RLS entirely.
+-- =============================================================================
+
+ALTER TABLE recurring_templates ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "recurring: admin can read" ON recurring_templates;
+CREATE POLICY "recurring: admin can read"
+  ON recurring_templates FOR SELECT
+  USING (org_id = get_my_org_id() AND is_org_admin());
+
+DROP POLICY IF EXISTS "recurring: admin can insert" ON recurring_templates;
+CREATE POLICY "recurring: admin can insert"
+  ON recurring_templates FOR INSERT
+  WITH CHECK (org_id = get_my_org_id() AND is_org_admin());
+
+DROP POLICY IF EXISTS "recurring: admin can update" ON recurring_templates;
+CREATE POLICY "recurring: admin can update"
+  ON recurring_templates FOR UPDATE
+  USING (org_id = get_my_org_id() AND is_org_admin());
+
+DROP POLICY IF EXISTS "recurring: admin can delete" ON recurring_templates;
+CREATE POLICY "recurring: admin can delete"
+  ON recurring_templates FOR DELETE
+  USING (org_id = get_my_org_id() AND is_org_admin());
+
+
+-- =============================================================================
 -- NOTIFICATIONS
--- Inserts via admin client only — no INSERT policy.
--- ============================================================
+-- Users can read and mark-read their own notifications only.
+-- INSERT is service-role only (createAdminClient in server actions).
+-- Supabase Realtime CDC on this table drives the bell in real time.
+-- =============================================================================
 
-DROP POLICY IF EXISTS "notifications_select_own" ON public.notifications;
-CREATE POLICY "notifications_select_own" ON public.notifications
-  FOR SELECT USING (user_id = auth.uid() AND org_id = get_my_org_id());
+ALTER TABLE notifications ENABLE ROW LEVEL SECURITY;
 
-DROP POLICY IF EXISTS "notifications_update_own" ON public.notifications;
-CREATE POLICY "notifications_update_own" ON public.notifications
-  FOR UPDATE USING (user_id = auth.uid());
+DROP POLICY IF EXISTS "notifications: user can read own" ON notifications;
+CREATE POLICY "notifications: user can read own"
+  ON notifications FOR SELECT
+  USING (user_id = auth.uid() AND org_id = get_my_org_id());
+
+DROP POLICY IF EXISTS "notifications: user can mark read" ON notifications;
+CREATE POLICY "notifications: user can mark read"
+  ON notifications FOR UPDATE
+  USING (user_id = auth.uid() AND org_id = get_my_org_id())
+  WITH CHECK (user_id = auth.uid() AND org_id = get_my_org_id());
+
+
+-- =============================================================================
+-- CALENDAR_EVENTS
+-- A user can see an event if they created it OR it was assigned to them.
+-- Admins can see all events in their org.
+-- A user can only insert events in their own org; assigned_to must be in org.
+-- Only the creator or an admin can update/delete an event.
+-- =============================================================================
+
+ALTER TABLE calendar_events ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "events: member can read own or assigned" ON calendar_events;
+CREATE POLICY "events: member can read own or assigned"
+  ON calendar_events FOR SELECT
+  USING (
+    org_id = get_my_org_id()
+    AND (
+      is_org_admin()
+      OR created_by = auth.uid()
+      OR assigned_to = auth.uid()
+    )
+  );
+
+DROP POLICY IF EXISTS "events: member can insert" ON calendar_events;
+CREATE POLICY "events: member can insert"
+  ON calendar_events FOR INSERT
+  WITH CHECK (
+    org_id = get_my_org_id()
+    AND created_by = auth.uid()
+  );
+
+DROP POLICY IF EXISTS "events: creator or admin can update" ON calendar_events;
+CREATE POLICY "events: creator or admin can update"
+  ON calendar_events FOR UPDATE
+  USING (
+    org_id = get_my_org_id()
+    AND (created_by = auth.uid() OR is_org_admin())
+  );
+
+DROP POLICY IF EXISTS "events: creator or admin can delete" ON calendar_events;
+CREATE POLICY "events: creator or admin can delete"
+  ON calendar_events FOR DELETE
+  USING (
+    org_id = get_my_org_id()
+    AND (created_by = auth.uid() OR is_org_admin())
+  );
+
+
+-- =============================================================================
+-- DONE
+-- =============================================================================
+-- Verify with:
+--   SELECT tablename, rowsecurity FROM pg_tables
+--   WHERE schemaname = 'public'
+--   ORDER BY tablename;

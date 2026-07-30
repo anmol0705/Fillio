@@ -1,854 +1,755 @@
 'use server';
+import 'server-only';
 
 import { z } from 'zod';
+import { and, desc, eq, inArray, isNull, or } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
+
 import { db } from '@/db';
-import { tasks, task_access, task_messages } from '@/db/schema';
-import { eq, and, inArray } from 'drizzle-orm';
+import { tasks, task_access, task_audit_log, task_messages, profiles, clients } from '@/db/schema';
 import { getCurrentUser } from '@/lib/auth/getUser';
-import { createAdminClient } from '@/lib/supabase/server';
-import {
-  createTaskSchema,
-  updateStatusSchema,
-  addMessageSchema,
-  STATUS_TRANSITIONS,
-} from '@/lib/validations/task';
-import type { Task, TaskWithRelations, TaskDetailWithAll, Profile, TaskAccess, TaskAuditLog } from '@/types';
+import { insertNotification } from '@/actions/notifications';
+import type {
+  Profile, TaskListItem, TaskDetail,
+  TaskType, TaskStatus, TaskPriority, AccessLevel,
+  TaskMessageWithSender,
+} from '@/types';
 
 // ---------------------------------------------------------------------------
-// Internal context helpers
+// Status transition map — enforces the exact workflow from the spec.
+// completed has no valid transitions (immutable).
 // ---------------------------------------------------------------------------
 
-type UserContext = { userId: string; orgId: string };
+const VALID_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
+  not_started:       ['in_progress'],
+  in_progress:       ['under_review'],
+  under_review:      ['changes_requested', 'approved'],
+  changes_requested: ['in_progress'],
+  approved:          ['filed'],
+  filed:             ['completed'],
+  completed:         [],
+};
 
-async function resolveUser(): Promise<UserContext | { error: string }> {
+// ---------------------------------------------------------------------------
+// Org member guard — all task operations require an active org member
+// ---------------------------------------------------------------------------
+
+type MemberResult = { ok: false; error: string } | { ok: true; profile: Profile };
+
+async function requireOrgMember(): Promise<MemberResult> {
   const user = await getCurrentUser();
-  if (!user) return { error: 'Unauthorized' };
+  if (!user) return { ok: false, error: 'Not authenticated' };
 
   const profile = await db.query.profiles.findFirst({
     where: (p, { eq }) => eq(p.id, user.id),
-    columns: { id: true, org_id: true },
   });
 
-  if (!profile) return { error: 'Profile not found' };
-  return { userId: user.id, orgId: profile.org_id };
-}
-
-function isErrorResult(v: unknown): v is { error: string } {
-  return typeof v === 'object' && v !== null && 'error' in v;
+  if (!profile?.is_active) return { ok: false, error: 'Account is inactive' };
+  return { ok: true, profile: profile as Profile };
 }
 
 // ---------------------------------------------------------------------------
-// Admin-only write helpers
-// task_audit_log, task_access, notifications must go through adminClient
+// Task access guard — checks user has at least `minLevel` on a specific task.
+//
+// Access hierarchy: owner > editor > viewer
+// Completed tasks are readable by anyone with access but editable by nobody.
 // ---------------------------------------------------------------------------
 
-type AuditAction =
-  | 'created'
-  | 'status_changed'
-  | 'reassigned'
-  | 'comment_added'
-  | 'file_uploaded'
-  | 'access_granted';
+const ACCESS_RANK: Record<AccessLevel, number> = { owner: 3, editor: 2, viewer: 1 };
 
-async function insertAuditLog(params: {
-  task_id: string;
+async function getTaskAccess(
+  taskId: string,
+  userId: string,
+): Promise<AccessLevel | null> {
+  const row = await db.query.task_access.findFirst({
+    where: (ta, { and, eq }) =>
+      and(eq(ta.task_id, taskId), eq(ta.user_id, userId)),
+  });
+  return (row?.level ?? null) as AccessLevel | null;
+}
+
+async function requireTaskAccess(
+  taskId: string,
+  userId: string,
+  minLevel: AccessLevel,
+): Promise<{ ok: false; error: string } | { ok: true; level: AccessLevel }> {
+  const level = await getTaskAccess(taskId, userId);
+  if (!level) return { ok: false, error: 'Task not found or access denied' };
+  if (ACCESS_RANK[level] < ACCESS_RANK[minLevel]) {
+    return { ok: false, error: 'You do not have permission for this action' };
+  }
+  return { ok: true, level };
+}
+
+// ---------------------------------------------------------------------------
+// insertAuditLog — always insert via the same db connection (server-side,
+// bypasses RLS). Audit log is INSERT-only; never update or delete these rows.
+// ---------------------------------------------------------------------------
+
+async function insertAuditLog(entry: {
+  task_id:  string;
+  org_id:   string;
   actor_id: string;
-  action: AuditAction;
-  old_value?: string | null;
-  new_value?: string | null;
-}): Promise<void> {
-  const admin = createAdminClient();
-  const { error } = await admin.from('task_audit_log').insert({
-    task_id: params.task_id,
-    actor_id: params.actor_id,
-    action: params.action,
-    old_value: params.old_value ?? null,
-    new_value: params.new_value ?? null,
+  action:   typeof task_audit_log.$inferInsert['action'];
+  payload?: Record<string, unknown>;
+}) {
+  await db.insert(task_audit_log).values({
+    task_id:  entry.task_id,
+    org_id:   entry.org_id,
+    actor_id: entry.actor_id,
+    action:   entry.action,
+    payload:  entry.payload ?? null,
   });
-  if (error) {
-    // Audit log failures are non-fatal but must be logged server-side
-    console.error('[insertAuditLog]', error);
-  }
 }
 
-async function insertNotification(params: {
-  org_id: string;
-  user_id: string;
-  task_id: string;
-  title: string;
-  body?: string;
-}): Promise<void> {
-  const admin = createAdminClient();
-  const { error } = await admin.from('notifications').insert(params);
-  if (error) {
-    console.error('[insertNotification]', error);
+// ---------------------------------------------------------------------------
+// getMyTasks — tasks the current user has explicit access to
+// Supports optional filters: status, type, priority
+// ---------------------------------------------------------------------------
+
+export type TaskFilters = {
+  status?:   TaskStatus;
+  type?:     TaskType;
+  priority?: TaskPriority;
+};
+
+export async function getMyTasks(filters: TaskFilters = {}): Promise<
+  { error: string; data: null } | { error: null; data: TaskListItem[] }
+> {
+  const result = await requireOrgMember();
+  if (!result.ok) return { error: result.error, data: null };
+
+  const userId = result.profile.id;
+
+  // Get task IDs this user has access to
+  const accessRows = await db.query.task_access.findMany({
+    where: (ta, { eq }) => eq(ta.user_id, userId),
+    columns: { task_id: true, level: true },
+  });
+
+  if (accessRows.length === 0) return { error: null, data: [] };
+
+  const taskIds   = accessRows.map((r) => r.task_id);
+  const accessMap = new Map(accessRows.map((r) => [r.task_id, r.level as AccessLevel]));
+
+  // Aliases for joining profiles twice (creator and assignee)
+  const assigneeAlias = alias(profiles, 'assignee');
+
+  const rows = await db
+    .select({
+      id:           tasks.id,
+      title:        tasks.title,
+      type:         tasks.type,
+      status:       tasks.status,
+      priority:     tasks.priority,
+      due_at:       tasks.due_at,
+      is_open_pool: tasks.is_open_pool,
+      created_at:   tasks.created_at,
+      assignee_id:  tasks.assignee_id,
+      assignee_name: assigneeAlias.full_name,
+      client_id:    tasks.client_id,
+      client_name:  clients.name,
+    })
+    .from(tasks)
+    .leftJoin(assigneeAlias, eq(assigneeAlias.id, tasks.assignee_id))
+    .leftJoin(clients, eq(clients.id, tasks.client_id))
+    .where(
+      and(
+        eq(tasks.org_id, result.profile.org_id),
+        eq(tasks.is_active, true),
+        inArray(tasks.id, taskIds),
+        filters.status   ? eq(tasks.status,   filters.status)   : undefined,
+        filters.type     ? eq(tasks.type,      filters.type)     : undefined,
+        filters.priority ? eq(tasks.priority,  filters.priority) : undefined,
+      )
+    )
+    .orderBy(desc(tasks.created_at));
+
+  const data: TaskListItem[] = rows.map((r) => ({
+    id:           r.id,
+    title:        r.title,
+    type:         r.type,
+    status:       r.status,
+    priority:     r.priority,
+    due_at:       r.due_at,
+    is_open_pool: r.is_open_pool,
+    created_at:   r.created_at,
+    assignee:     r.assignee_id ? { id: r.assignee_id, full_name: r.assignee_name ?? '' } : null,
+    client:       r.client_id   ? { id: r.client_id,   name: r.client_name ?? '' }        : null,
+    my_access:    accessMap.get(r.id) ?? null,
+  }));
+
+  return { error: null, data };
+}
+
+// ---------------------------------------------------------------------------
+// getPoolTasks — all open-pool tasks in the org visible to any member
+// ---------------------------------------------------------------------------
+
+export async function getPoolTasks(): Promise<
+  { error: string; data: null } | { error: null; data: TaskListItem[] }
+> {
+  const result = await requireOrgMember();
+  if (!result.ok) return { error: result.error, data: null };
+
+  const userId = result.profile.id;
+
+  // User's existing access on pool tasks (so we can show if they already claimed)
+  const accessRows = await db.query.task_access.findMany({
+    where: (ta, { eq }) => eq(ta.user_id, userId),
+    columns: { task_id: true, level: true },
+  });
+  const accessMap = new Map(accessRows.map((r) => [r.task_id, r.level as AccessLevel]));
+
+  const assigneeAlias = alias(profiles, 'assignee');
+
+  const rows = await db
+    .select({
+      id:           tasks.id,
+      title:        tasks.title,
+      type:         tasks.type,
+      status:       tasks.status,
+      priority:     tasks.priority,
+      due_at:       tasks.due_at,
+      is_open_pool: tasks.is_open_pool,
+      created_at:   tasks.created_at,
+      assignee_id:  tasks.assignee_id,
+      assignee_name: assigneeAlias.full_name,
+      client_id:    tasks.client_id,
+      client_name:  clients.name,
+    })
+    .from(tasks)
+    .leftJoin(assigneeAlias, eq(assigneeAlias.id, tasks.assignee_id))
+    .leftJoin(clients, eq(clients.id, tasks.client_id))
+    .where(
+      and(
+        eq(tasks.org_id, result.profile.org_id),
+        eq(tasks.is_active, true),
+        eq(tasks.is_open_pool, true),
+      )
+    )
+    .orderBy(desc(tasks.created_at));
+
+  const data: TaskListItem[] = rows.map((r) => ({
+    id:           r.id,
+    title:        r.title,
+    type:         r.type,
+    status:       r.status,
+    priority:     r.priority,
+    due_at:       r.due_at,
+    is_open_pool: r.is_open_pool,
+    created_at:   r.created_at,
+    assignee:     r.assignee_id ? { id: r.assignee_id, full_name: r.assignee_name ?? '' } : null,
+    client:       r.client_id   ? { id: r.client_id,   name: r.client_name ?? '' }        : null,
+    my_access:    accessMap.get(r.id) ?? null,
+  }));
+
+  return { error: null, data };
+}
+
+// ---------------------------------------------------------------------------
+// getTaskDetail — single task with full related data
+// ---------------------------------------------------------------------------
+
+export async function getTaskDetail(taskId: string): Promise<
+  { error: string; data: null } | { error: null; data: TaskDetail }
+> {
+  if (!z.string().uuid().safeParse(taskId).success) {
+    return { error: 'Invalid task ID', data: null };
   }
+
+  const result = await requireOrgMember();
+  if (!result.ok) return { error: result.error, data: null };
+
+  const userId = result.profile.id;
+
+  // Fetch task
+  const task = await db.query.tasks.findFirst({
+    where: (t, { and, eq }) =>
+      and(eq(t.id, taskId), eq(t.org_id, result.profile.org_id), eq(t.is_active, true)),
+  });
+
+  // Allow access if user has task_access OR task is open pool
+  const myAccess = await getTaskAccess(taskId, userId);
+  if (!task) return { error: 'Task not found', data: null };
+  if (!myAccess && !task.is_open_pool) return { error: 'Access denied', data: null };
+
+  // Batch-fetch all profiles needed (creator + assignee + access list)
+  const accessRows = await db.query.task_access.findMany({
+    where: (ta, { eq }) => eq(ta.task_id, taskId),
+  });
+
+  const profileIds = [
+    task.creator_id,
+    task.assignee_id,
+    ...accessRows.map((r) => r.user_id),
+  ].filter(Boolean) as string[];
+
+  const [allProfiles, clientRow, auditRows] = await Promise.all([
+    db.query.profiles.findMany({
+      where: (p, { inArray }) => inArray(p.id, [...new Set(profileIds)]),
+      columns: { id: true, full_name: true },
+    }),
+    task.client_id
+      ? db.query.clients.findFirst({
+          where: (c, { eq }) => eq(c.id, task.client_id!),
+          columns: { id: true, name: true },
+        })
+      : Promise.resolve(null),
+    db.query.task_audit_log.findMany({
+      where: (a, { eq }) => eq(a.task_id, taskId),
+      orderBy: (a, { asc }) => [asc(a.created_at)],
+    }),
+  ]);
+
+  const profileMap = new Map(allProfiles.map((p) => [p.id, p]));
+
+  const detail: TaskDetail = {
+    ...(task as any),
+    creator:  profileMap.get(task.creator_id) ?? { id: task.creator_id, full_name: 'Unknown' },
+    assignee: task.assignee_id ? (profileMap.get(task.assignee_id) ?? null) : null,
+    client:   clientRow ?? null,
+    access:   accessRows.map((r) => ({
+      ...r,
+      profile: profileMap.get(r.user_id) ?? { full_name: 'Unknown' },
+    })) as TaskDetail['access'],
+    audit_log: auditRows.map((r) => ({
+      ...r,
+      actor: profileMap.get(r.actor_id) ?? { full_name: 'Unknown' },
+    })) as TaskDetail['audit_log'],
+    my_access: myAccess,
+  };
+
+  return { error: null, data: detail };
 }
 
 // ---------------------------------------------------------------------------
 // createTask
 // ---------------------------------------------------------------------------
 
+const CreateTaskSchema = z.object({
+  title:          z.string().min(1, 'Title is required').max(300),
+  description:    z.string().max(5000).optional(),
+  type:           z.enum(['gst','tds','income_tax','audit','roc_mca','accounting','payroll','notice','advisory','other']),
+  priority:       z.enum(['urgent','high','medium','low']).default('medium'),
+  due_at:         z.string().datetime({ offset: true }).nullable().optional(),
+  client_id:      z.string().uuid().nullable().optional(),
+  financial_year: z.string().max(10).nullable().optional(),
+  assignee_id:    z.string().uuid().nullable().optional(),
+  is_open_pool:   z.boolean().default(false),
+});
+
 export async function createTask(
-  input: z.infer<typeof createTaskSchema>,
-): Promise<{ data: Task } | { error: string }> {
-  const ctx = await resolveUser();
-  if (isErrorResult(ctx)) return ctx;
+  raw: unknown
+): Promise<{ error: string } | { data: { id: string } }> {
+  const result = await requireOrgMember();
+  if (!result.ok) return { error: result.error };
 
-  const parsed = createTaskSchema.safeParse(input);
-  if (!parsed.success) {
-    return { error: parsed.error.message };
-  }
+  const parsed = CreateTaskSchema.safeParse(raw);
+  if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid input' };
 
-  const data = parsed.data;
+  const { due_at, ...rest } = parsed.data;
+  const creatorId = result.profile.id;
+  const orgId     = result.profile.org_id;
 
-  // Validate client_id belongs to same org if provided
-  if (data.client_id) {
-    const client = await db.query.clients.findFirst({
-      where: (c, { and, eq }) =>
-        and(eq(c.id, data.client_id!), eq(c.org_id, ctx.orgId), eq(c.is_active, true)),
-      columns: { id: true },
+  const [task] = await db
+    .insert(tasks)
+    .values({
+      org_id:     orgId,
+      creator_id: creatorId,
+      due_at:     due_at ? new Date(due_at) : null,
+      ...rest,
+    })
+    .returning({ id: tasks.id });
+
+  // Grant owner access to creator, editor to assignee (if different)
+  const accessEntries: (typeof task_access.$inferInsert)[] = [
+    { task_id: task.id, user_id: creatorId, level: 'owner', granted_by: creatorId },
+  ];
+
+  const assigneeId = parsed.data.assignee_id;
+  if (assigneeId && assigneeId !== creatorId) {
+    accessEntries.push({
+      task_id: task.id, user_id: assigneeId, level: 'editor', granted_by: creatorId,
     });
-    if (!client) return { error: 'Client not found in this organisation' };
   }
 
-  // Validate assignee_id belongs to same org if provided
-  if (data.assignee_id) {
-    const assignee = await db.query.profiles.findFirst({
-      where: (p, { and, eq }) =>
-        and(eq(p.id, data.assignee_id!), eq(p.org_id, ctx.orgId), eq(p.is_active, true)),
-      columns: { id: true },
-    });
-    if (!assignee) return { error: 'Assignee not found in this organisation' };
-  }
+  await db.insert(task_access).values(accessEntries);
 
-  try {
-    const [task] = await db
-      .insert(tasks)
-      .values({
-        ...data,
-        org_id: ctx.orgId,
-        creator_id: ctx.userId,
-        due_at: data.due_at ? new Date(data.due_at) : null,
-      })
-      .returning();
+  await insertAuditLog({
+    task_id:  task.id,
+    org_id:   orgId,
+    actor_id: creatorId,
+    action:   'created',
+    payload:  { title: parsed.data.title },
+  });
 
-    const admin = createAdminClient();
-
-    // task_access rows must be inserted via adminClient — no RLS INSERT policy
-    const accessRows: {
-      task_id: string;
-      user_id: string;
-      access_level: 'owner' | 'editor' | 'viewer';
-    }[] = [{ task_id: task.id, user_id: ctx.userId, access_level: 'owner' }];
-
-    if (data.assignee_id && data.assignee_id !== ctx.userId) {
-      accessRows.push({
-        task_id: task.id,
-        user_id: data.assignee_id,
-        access_level: 'editor',
-      });
-    }
-
-    const { error: accessError } = await admin.from('task_access').insert(accessRows);
-    if (accessError) {
-      console.error(JSON.stringify({ level: 'error', fn: 'createTask', step: 'task_access', err: accessError.message }));
-      // Rollback: delete the task we just created so no orphan is left
-      await db.delete(tasks).where(eq(tasks.id, task.id));
-      return { error: 'Failed to create task — access grant failed. Please try again.' };
-    }
-
-    await insertAuditLog({
+  if (assigneeId && assigneeId !== creatorId) {
+    void insertNotification({
+      org_id:  orgId,
+      user_id: assigneeId,
       task_id: task.id,
-      actor_id: ctx.userId,
-      action: 'created',
-      new_value: task.title,
+      type:    'task_assigned',
+      title:   'New task assigned to you',
+      body:    parsed.data.title,
     });
-
-    if (data.assignee_id && data.assignee_id !== ctx.userId) {
-      await insertNotification({
-        org_id: ctx.orgId,
-        user_id: data.assignee_id,
-        task_id: task.id,
-        title: 'New task assigned',
-        body: task.title,
-      });
-    }
-
-    return { data: task };
-  } catch (err) {
-    console.error('[createTask]', err);
-    return { error: 'Failed to create task' };
   }
+
+  return { data: { id: task.id } };
 }
 
 // ---------------------------------------------------------------------------
-// updateTaskStatus
+// updateTask — owner only, blocked on completed tasks
 // ---------------------------------------------------------------------------
 
-export async function updateTaskStatus(
-  input: z.infer<typeof updateStatusSchema>,
-): Promise<{ data: Task } | { error: string }> {
-  const ctx = await resolveUser();
-  if (isErrorResult(ctx)) return ctx;
-
-  const parsed = updateStatusSchema.safeParse(input);
-  if (!parsed.success) {
-    return { error: parsed.error.message };
-  }
-
-  const { task_id, new_status } = parsed.data;
-
-  // Verify caller has edit or owner access to this task
-  const access = await db.query.task_access.findFirst({
-    where: (ta, { and, eq, inArray }) =>
-      and(
-        eq(ta.task_id, task_id),
-        eq(ta.user_id, ctx.userId),
-        inArray(ta.access_level, ['owner', 'editor']),
-      ),
-    columns: { access_level: true },
-  });
-  if (!access) return { error: 'Forbidden: no edit access to this task' };
-
-  const task = await db.query.tasks.findFirst({
-    where: (t, { and, eq }) =>
-      and(eq(t.id, task_id), eq(t.org_id, ctx.orgId), eq(t.is_active, true)),
-  });
-  if (!task) return { error: 'Task not found' };
-
-  if (task.status === 'completed') {
-    return { error: 'Completed tasks are immutable' };
-  }
-
-  const allowed = STATUS_TRANSITIONS[task.status] ?? [];
-  if (!allowed.includes(new_status)) {
-    return { error: `Invalid transition: ${task.status} → ${new_status}` };
-  }
-
-  try {
-    const [updated] = await db
-      .update(tasks)
-      .set({ status: new_status, updated_at: new Date() })
-      .where(and(eq(tasks.id, task_id), eq(tasks.org_id, ctx.orgId)))
-      .returning();
-
-    await insertAuditLog({
-      task_id,
-      actor_id: ctx.userId,
-      action: 'status_changed',
-      old_value: task.status,
-      new_value: new_status,
-    });
-
-    // Notify task creator when a different user submits for review
-    if (new_status === 'under_review' && task.creator_id !== ctx.userId) {
-      await insertNotification({
-        org_id: ctx.orgId,
-        user_id: task.creator_id,
-        task_id,
-        title: 'Task ready for review',
-        body: task.title,
-      });
-    }
-
-    return { data: updated };
-  } catch (err) {
-    console.error('[updateTaskStatus]', err);
-    return { error: 'Failed to update task status' };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// getMyTasks
-// ---------------------------------------------------------------------------
-
-const filtersSchema = z
-  .object({
-    status: z
-      .enum([
-        'not_started',
-        'in_progress',
-        'under_review',
-        'changes_requested',
-        'approved',
-        'filed',
-        'completed',
-      ])
-      .optional(),
-    task_type: z
-      .enum([
-        'gst',
-        'tds',
-        'income_tax',
-        'audit',
-        'roc_mca',
-        'accounting',
-        'payroll',
-        'notice',
-        'advisory',
-        'other',
-      ])
-      .optional(),
-    priority: z.enum(['urgent', 'high', 'medium', 'low']).optional(),
-    assignee_id: z.string().uuid().optional(),
-  })
-  .optional();
-
-export async function getMyTasks(
-  filters?: z.infer<typeof filtersSchema>,
-): Promise<{ data: TaskWithRelations[] } | { error: string }> {
-  const ctx = await resolveUser();
-  if (isErrorResult(ctx)) return ctx;
-
-  const parsedFilters = filtersSchema.safeParse(filters);
-  if (!parsedFilters.success) return { error: 'Invalid filters' };
-  const f = parsedFilters.data;
-
-  try {
-    // Fetch task IDs the user has access to
-    const accessRows = await db
-      .select({ task_id: task_access.task_id })
-      .from(task_access)
-      .where(eq(task_access.user_id, ctx.userId));
-
-    if (accessRows.length === 0) return { data: [] };
-
-    const taskIds = accessRows.map((r) => r.task_id);
-
-    const result = await db.query.tasks.findMany({
-      where: (t, { and, eq, inArray }) => {
-        const conditions = [
-          inArray(t.id, taskIds),
-          eq(t.org_id, ctx.orgId),
-          eq(t.is_active, true),
-        ];
-        if (f?.status) {
-          conditions.push(eq(t.status, f.status));
-        }
-        if (f?.priority) {
-          conditions.push(eq(t.priority, f.priority));
-        }
-        if (f?.task_type) {
-          conditions.push(eq(t.task_type, f.task_type));
-        }
-        if (f?.assignee_id) {
-          conditions.push(eq(t.assignee_id, f.assignee_id));
-        }
-        return and(...conditions);
-      },
-      with: {
-        client: true,
-        assignee: true,
-        creator: true,
-      },
-      orderBy: (t, { desc }) => [desc(t.updated_at)],
-    });
-
-    return { data: result as TaskWithRelations[] };
-  } catch (err) {
-    console.error('[getMyTasks]', err);
-    return { error: 'Failed to fetch tasks' };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// getTaskDetail
-// ---------------------------------------------------------------------------
-
-export async function getTaskDetail(
-  id: string,
-): Promise<{ data: TaskDetailWithAll | null } | { error: string }> {
-  const ctx = await resolveUser();
-  if (isErrorResult(ctx)) return ctx;
-
-  const idParsed = z.string().uuid().safeParse(id);
-  if (!idParsed.success) return { error: 'Invalid task id' };
-
-  try {
-    const task = await db.query.tasks.findFirst({
-      where: (t, { and, eq }) =>
-        and(eq(t.id, id), eq(t.org_id, ctx.orgId), eq(t.is_active, true)),
-      with: {
-        client: true,
-        assignee: true,
-        creator: true,
-        access: {
-          with: { user: true },
-        },
-        auditLog: {
-          with: { actor: true },
-          orderBy: (al, { asc }) => [asc(al.created_at)],
-        },
-        messages: {
-          orderBy: (m, { asc }) => [asc(m.created_at)],
-        },
-      },
-    });
-
-    if (!task) return { data: null };
-
-    // Enforce access control: caller must be in task_access OR task is open pool
-    const hasAccess = task.access.some((a) => a.user_id === ctx.userId);
-    if (!hasAccess && !task.is_open_pool) return { data: null };
-
-    const detail: TaskDetailWithAll = {
-      // Core task fields
-      id: task.id,
-      org_id: task.org_id,
-      title: task.title,
-      description: task.description,
-      task_type: task.task_type,
-      status: task.status,
-      priority: task.priority,
-      client_id: task.client_id,
-      assignee_id: task.assignee_id,
-      creator_id: task.creator_id,
-      financial_year: task.financial_year,
-      due_at: task.due_at,
-      is_open_pool: task.is_open_pool,
-      is_active: task.is_active,
-      created_at: task.created_at,
-      updated_at: task.updated_at,
-      // Relations
-      client: task.client ?? null,
-      assignee: task.assignee ?? null,
-      creator: task.creator as Profile,
-      accessList: task.access as (TaskAccess & { user: Profile })[],
-      auditLog: task.auditLog as (TaskAuditLog & { actor: Profile })[],
-      messageCount: task.messages.length,
-    };
-
-    return { data: detail };
-  } catch (err) {
-    console.error('[getTaskDetail]', err);
-    return { error: 'Failed to fetch task detail' };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// getPoolTasks
-// ---------------------------------------------------------------------------
-
-export async function getPoolTasks(): Promise<{ data: TaskWithRelations[] } | { error: string }> {
-  const ctx = await resolveUser();
-  if (isErrorResult(ctx)) return ctx;
-
-  try {
-    const result = await db.query.tasks.findMany({
-      where: (t, { and, eq }) =>
-        and(eq(t.org_id, ctx.orgId), eq(t.is_open_pool, true), eq(t.is_active, true)),
-      with: {
-        client: true,
-        assignee: true,
-        creator: true,
-      },
-      orderBy: (t, { desc }) => [desc(t.created_at)],
-    });
-
-    return { data: result as TaskWithRelations[] };
-  } catch (err) {
-    console.error('[getPoolTasks]', err);
-    return { error: 'Failed to fetch pool tasks' };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// claimPoolTask
-// ---------------------------------------------------------------------------
-
-export async function claimPoolTask(
-  task_id: string,
-): Promise<{ data: Task } | { error: string }> {
-  const ctx = await resolveUser();
-  if (isErrorResult(ctx)) return ctx;
-
-  const idParsed = z.string().uuid().safeParse(task_id);
-  if (!idParsed.success) return { error: 'Invalid task id' };
-
-  const task = await db.query.tasks.findFirst({
-    where: (t, { and, eq }) =>
-      and(
-        eq(t.id, task_id),
-        eq(t.org_id, ctx.orgId),
-        eq(t.is_open_pool, true),
-        eq(t.is_active, true),
-      ),
-    columns: { id: true, assignee_id: true },
-  });
-  if (!task) return { error: 'Task not found in pool' };
-
-  try {
-    const [updated] = await db
-      .update(tasks)
-      .set({ assignee_id: ctx.userId, is_open_pool: false, updated_at: new Date() })
-      .where(and(eq(tasks.id, task_id), eq(tasks.org_id, ctx.orgId)))
-      .returning();
-
-    const admin = createAdminClient();
-
-    // Only insert access row if user doesn't already have one (e.g. creator)
-    const existing = await db.query.task_access.findFirst({
-      where: (ta, { and, eq }) =>
-        and(eq(ta.task_id, task_id), eq(ta.user_id, ctx.userId)),
-      columns: { id: true },
-    });
-
-    if (!existing) {
-      const { error: accessError } = await admin.from('task_access').insert({
-        task_id,
-        user_id: ctx.userId,
-        access_level: 'editor',
-      });
-      if (accessError) {
-        console.error('[claimPoolTask] task_access insert failed', accessError);
-      }
-    }
-
-    await insertAuditLog({
-      task_id,
-      actor_id: ctx.userId,
-      action: 'reassigned',
-      new_value: ctx.userId,
-    });
-
-    return { data: updated };
-  } catch (err) {
-    console.error('[claimPoolTask]', err);
-    return { error: 'Failed to claim task' };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// grantTaskAccess
-// ---------------------------------------------------------------------------
-
-export async function grantTaskAccess(params: {
-  task_id: string;
-  user_id: string;
-  access_level: 'editor' | 'viewer';
-}): Promise<{ data: true } | { error: string }> {
-  const ctx = await resolveUser();
-  if (isErrorResult(ctx)) return ctx;
-
-  const taskIdParsed = z.string().uuid().safeParse(params.task_id);
-  if (!taskIdParsed.success) return { error: 'Invalid task id' };
-
-  const userIdParsed = z.string().uuid().safeParse(params.user_id);
-  if (!userIdParsed.success) return { error: 'Invalid user id' };
-
-  if (!['editor', 'viewer'].includes(params.access_level)) {
-    return { error: 'access_level must be editor or viewer' };
-  }
-
-  // Caller must be the task owner
-  const ownerAccess = await db.query.task_access.findFirst({
-    where: (ta, { and, eq }) =>
-      and(
-        eq(ta.task_id, params.task_id),
-        eq(ta.user_id, ctx.userId),
-        eq(ta.access_level, 'owner'),
-      ),
-    columns: { id: true },
-  });
-  if (!ownerAccess) return { error: 'Forbidden: only task owner can grant access' };
-
-  // Target user must exist in same org
-  const targetProfile = await db.query.profiles.findFirst({
-    where: (p, { and, eq }) =>
-      and(eq(p.id, params.user_id), eq(p.org_id, ctx.orgId), eq(p.is_active, true)),
-    columns: { id: true },
-  });
-  if (!targetProfile) return { error: 'User not found in organisation' };
-
-  try {
-    const admin = createAdminClient();
-    const { error: upsertError } = await admin.from('task_access').upsert(
-      {
-        task_id: params.task_id,
-        user_id: params.user_id,
-        access_level: params.access_level,
-      },
-      { onConflict: 'task_id,user_id' },
-    );
-    if (upsertError) return { error: `Failed to grant access: ${upsertError.message}` };
-
-    await insertAuditLog({
-      task_id: params.task_id,
-      actor_id: ctx.userId,
-      action: 'access_granted',
-      new_value: `${params.user_id}:${params.access_level}`,
-    });
-
-    return { data: true };
-  } catch (err) {
-    console.error('[grantTaskAccess]', err);
-    return { error: 'Failed to grant access' };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// addTaskMessage
-// ---------------------------------------------------------------------------
-
-export async function addTaskMessage(
-  input: z.infer<typeof addMessageSchema>,
-): Promise<{ data: true } | { error: string }> {
-  const ctx = await resolveUser();
-  if (isErrorResult(ctx)) return ctx;
-
-  const parsed = addMessageSchema.safeParse(input);
-  if (!parsed.success) {
-    return { error: parsed.error.message };
-  }
-
-  const { task_id, content } = parsed.data;
-
-  // Caller must have any access level (viewer can read; but can they comment?)
-  // Per product intent: any access row allows messaging
-  const access = await db.query.task_access.findFirst({
-    where: (ta, { and, eq }) =>
-      and(eq(ta.task_id, task_id), eq(ta.user_id, ctx.userId)),
-    columns: { access_level: true },
-  });
-  if (!access) return { error: 'Forbidden: no access to this task' };
-
-  // Verify task is in same org and active
-  const task = await db.query.tasks.findFirst({
-    where: (t, { and, eq }) =>
-      and(eq(t.id, task_id), eq(t.org_id, ctx.orgId), eq(t.is_active, true)),
-    columns: { id: true },
-  });
-  if (!task) return { error: 'Task not found' };
-
-  try {
-    await db.insert(task_messages).values({
-      task_id,
-      sender_id: ctx.userId,
-      content,
-    });
-
-    await insertAuditLog({
-      task_id,
-      actor_id: ctx.userId,
-      action: 'comment_added',
-    });
-
-    return { data: true };
-  } catch (err) {
-    console.error('[addTaskMessage]', err);
-    return { error: 'Failed to send message' };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// updateTask (soft field update — title, description, priority, due_at)
-// ---------------------------------------------------------------------------
-
-const updateTaskFieldsSchema = z.object({
-  task_id: z.string().uuid(),
-  title: z.string().min(1).max(500).optional(),
-  description: z.string().max(5000).nullable().optional(),
-  priority: z.enum(['urgent', 'high', 'medium', 'low']).optional(),
-  due_at: z.string().datetime().nullable().optional(),
-  assignee_id: z.string().uuid().nullable().optional(),
-  financial_year: z.string().max(10).optional(),
+const UpdateTaskSchema = z.object({
+  taskId:         z.string().uuid(),
+  title:          z.string().min(1).max(300).optional(),
+  description:    z.string().max(5000).nullable().optional(),
+  priority:       z.enum(['urgent','high','medium','low']).optional(),
+  due_at:         z.string().datetime({ offset: true }).nullable().optional(),
+  client_id:      z.string().uuid().nullable().optional(),
+  financial_year: z.string().max(10).nullable().optional(),
+  assignee_id:    z.string().uuid().nullable().optional(),
+  is_open_pool:   z.boolean().optional(),
 });
 
 export async function updateTask(
-  input: z.infer<typeof updateTaskFieldsSchema>,
-): Promise<{ data: Task } | { error: string }> {
-  const ctx = await resolveUser();
-  if (isErrorResult(ctx)) return ctx;
+  raw: unknown
+): Promise<{ error: string } | { data: 'ok' }> {
+  const result = await requireOrgMember();
+  if (!result.ok) return { error: result.error };
 
-  const parsed = updateTaskFieldsSchema.safeParse(input);
-  if (!parsed.success) {
-    return { error: parsed.error.message };
-  }
+  const parsed = UpdateTaskSchema.safeParse(raw);
+  if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid input' };
 
-  const { task_id, ...fields } = parsed.data;
+  const { taskId, due_at, ...rest } = parsed.data;
 
-  // Must be owner to update task fields
-  const ownerAccess = await db.query.task_access.findFirst({
-    where: (ta, { and, eq }) =>
-      and(
-        eq(ta.task_id, task_id),
-        eq(ta.user_id, ctx.userId),
-        eq(ta.access_level, 'owner'),
-      ),
-    columns: { id: true },
-  });
-  if (!ownerAccess) return { error: 'Forbidden: only task owner can update task fields' };
+  const access = await requireTaskAccess(taskId, result.profile.id, 'owner');
+  if (!access.ok) return { error: access.error };
 
   const task = await db.query.tasks.findFirst({
-    where: (t, { and, eq }) =>
-      and(eq(t.id, task_id), eq(t.org_id, ctx.orgId), eq(t.is_active, true)),
-    columns: { id: true, status: true, creator_id: true, assignee_id: true },
+    where: (t, { eq }) => eq(t.id, taskId),
+    columns: { status: true, assignee_id: true },
+  });
+  if (!task) return { error: 'Task not found' };
+  if (task.status === 'completed') return { error: 'Completed tasks cannot be edited' };
+
+  const prevAssigneeId = task.assignee_id;
+  const newAssigneeId  = parsed.data.assignee_id;
+
+  await db
+    .update(tasks)
+    .set({ ...rest, due_at: due_at !== undefined ? (due_at ? new Date(due_at) : null) : undefined, updated_at: new Date() })
+    .where(eq(tasks.id, taskId));
+
+  // If assignee changed, update task_access and notify new assignee
+  if (newAssigneeId !== undefined && newAssigneeId !== prevAssigneeId) {
+    if (newAssigneeId && newAssigneeId !== result.profile.id) {
+      await db
+        .insert(task_access)
+        .values({ task_id: taskId, user_id: newAssigneeId, level: 'editor', granted_by: result.profile.id })
+        .onConflictDoNothing();
+      void insertNotification({
+        org_id:  result.profile.org_id,
+        user_id: newAssigneeId,
+        task_id: taskId,
+        type:    'task_reassigned',
+        title:   'Task reassigned to you',
+        body:    parsed.data.title ?? undefined,
+      });
+    }
+    await insertAuditLog({
+      task_id:  taskId,
+      org_id:   result.profile.org_id,
+      actor_id: result.profile.id,
+      action:   'reassigned',
+      payload:  { from: prevAssigneeId, to: newAssigneeId },
+    });
+  } else {
+    await insertAuditLog({
+      task_id:  taskId,
+      org_id:   result.profile.org_id,
+      actor_id: result.profile.id,
+      action:   'edited',
+    });
+  }
+
+  return { data: 'ok' };
+}
+
+// ---------------------------------------------------------------------------
+// updateTaskStatus — editor or owner, enforces transition table
+// ---------------------------------------------------------------------------
+
+export async function updateTaskStatus(
+  taskId: string,
+  newStatus: TaskStatus,
+): Promise<{ error: string } | { data: 'ok' }> {
+  if (!z.string().uuid().safeParse(taskId).success) return { error: 'Invalid task ID' };
+
+  const result = await requireOrgMember();
+  if (!result.ok) return { error: result.error };
+
+  const access = await requireTaskAccess(taskId, result.profile.id, 'editor');
+  if (!access.ok) return { error: access.error };
+
+  const task = await db.query.tasks.findFirst({
+    where: (t, { eq }) => eq(t.id, taskId),
+    columns: { status: true, org_id: true, creator_id: true, title: true },
   });
   if (!task) return { error: 'Task not found' };
   if (task.status === 'completed') return { error: 'Completed tasks are immutable' };
 
-  // Validate new assignee if changing
-  if (fields.assignee_id !== undefined && fields.assignee_id !== null) {
-    const assignee = await db.query.profiles.findFirst({
-      where: (p, { and, eq }) =>
-        and(eq(p.id, fields.assignee_id!), eq(p.org_id, ctx.orgId), eq(p.is_active, true)),
-      columns: { id: true },
+  const allowed = VALID_TRANSITIONS[task.status];
+  if (!allowed.includes(newStatus)) {
+    return { error: `Cannot transition from ${task.status} to ${newStatus}` };
+  }
+
+  await db.update(tasks).set({ status: newStatus, updated_at: new Date() }).where(eq(tasks.id, taskId));
+
+  await insertAuditLog({
+    task_id:  taskId,
+    org_id:   task.org_id,
+    actor_id: result.profile.id,
+    action:   'status_changed',
+    payload:  { from: task.status, to: newStatus },
+  });
+
+  // Notify creator when assignee submits for review (and they are not the same person)
+  if (newStatus === 'under_review' && task.creator_id !== result.profile.id) {
+    void insertNotification({
+      org_id:  task.org_id,
+      user_id: task.creator_id,
+      task_id: taskId,
+      type:    'task_under_review',
+      title:   'Task submitted for review',
+      body:    task.title,
     });
-    if (!assignee) return { error: 'Assignee not found in this organisation' };
   }
 
-  try {
-    const updates: Partial<typeof tasks.$inferInsert> = {
-      updated_at: new Date(),
-    };
-    if (fields.title !== undefined) updates.title = fields.title;
-    if (fields.description !== undefined) updates.description = fields.description;
-    if (fields.priority !== undefined) updates.priority = fields.priority;
-    if (fields.due_at !== undefined) updates.due_at = fields.due_at ? new Date(fields.due_at) : null;
-    if (fields.assignee_id !== undefined) updates.assignee_id = fields.assignee_id;
-    if (fields.financial_year !== undefined) updates.financial_year = fields.financial_year;
-
-    const [updated] = await db
-      .update(tasks)
-      .set(updates)
-      .where(and(eq(tasks.id, task_id), eq(tasks.org_id, ctx.orgId)))
-      .returning();
-
-    // If assignee changed, grant editor access to new assignee
-    if (
-      fields.assignee_id !== undefined &&
-      fields.assignee_id !== null &&
-      fields.assignee_id !== task.assignee_id
-    ) {
-      const admin = createAdminClient();
-      await admin.from('task_access').upsert(
-        {
-          task_id,
-          user_id: fields.assignee_id,
-          access_level: 'editor',
-        },
-        { onConflict: 'task_id,user_id' },
-      );
-
-      await insertAuditLog({
-        task_id,
-        actor_id: ctx.userId,
-        action: 'reassigned',
-        old_value: task.assignee_id ?? null,
-        new_value: fields.assignee_id,
-      });
-
-      await insertNotification({
-        org_id: ctx.orgId,
-        user_id: fields.assignee_id,
-        task_id,
-        title: 'Task assigned to you',
-        body: updated.title,
-      });
-    }
-
-    return { data: updated };
-  } catch (err) {
-    console.error('[updateTask]', err);
-    return { error: 'Failed to update task' };
-  }
+  return { data: 'ok' };
 }
 
 // ---------------------------------------------------------------------------
-// deactivateTask (soft delete — is_active = false)
+// deleteTask — soft delete, owner only
 // ---------------------------------------------------------------------------
 
-export async function deactivateTask(
-  task_id: string,
-): Promise<{ data: true } | { error: string }> {
-  const ctx = await resolveUser();
-  if (isErrorResult(ctx)) return ctx;
+export async function deleteTask(
+  taskId: string,
+): Promise<{ error: string } | { data: 'ok' }> {
+  if (!z.string().uuid().safeParse(taskId).success) return { error: 'Invalid task ID' };
 
-  const idParsed = z.string().uuid().safeParse(task_id);
-  if (!idParsed.success) return { error: 'Invalid task id' };
+  const result = await requireOrgMember();
+  if (!result.ok) return { error: result.error };
 
-  // Only owner can delete
-  const ownerAccess = await db.query.task_access.findFirst({
-    where: (ta, { and, eq }) =>
+  const access = await requireTaskAccess(taskId, result.profile.id, 'owner');
+  if (!access.ok) return { error: access.error };
+
+  await db.update(tasks).set({ is_active: false, updated_at: new Date() }).where(eq(tasks.id, taskId));
+
+  return { data: 'ok' };
+}
+
+// ---------------------------------------------------------------------------
+// grantAccess — owner grants editor or viewer access to any org member
+// ---------------------------------------------------------------------------
+
+export async function grantAccess(
+  taskId: string,
+  targetUserId: string,
+  level: 'editor' | 'viewer',
+): Promise<{ error: string } | { data: 'ok' }> {
+  if (!z.string().uuid().safeParse(taskId).success) return { error: 'Invalid task ID' };
+  if (!z.string().uuid().safeParse(targetUserId).success) return { error: 'Invalid user ID' };
+
+  const result = await requireOrgMember();
+  if (!result.ok) return { error: result.error };
+
+  const access = await requireTaskAccess(taskId, result.profile.id, 'owner');
+  if (!access.ok) return { error: access.error };
+
+  // Verify target user is in same org
+  const targetProfile = await db.query.profiles.findFirst({
+    where: (p, { and, eq }) =>
+      and(eq(p.id, targetUserId), eq(p.org_id, result.profile.org_id)),
+    columns: { id: true, full_name: true },
+  });
+  if (!targetProfile) return { error: 'User not found in your organisation' };
+
+  await db
+    .insert(task_access)
+    .values({ task_id: taskId, user_id: targetUserId, level, granted_by: result.profile.id })
+    .onConflictDoUpdate({
+      target: [task_access.task_id, task_access.user_id],
+      set:    { level, granted_by: result.profile.id },
+    });
+
+  await insertAuditLog({
+    task_id:  taskId,
+    org_id:   result.profile.org_id,
+    actor_id: result.profile.id,
+    action:   'access_granted',
+    payload:  { to: targetProfile.full_name, level },
+  });
+
+  return { data: 'ok' };
+}
+
+// ---------------------------------------------------------------------------
+// claimPoolTask — any org member can self-assign an open-pool task
+// ---------------------------------------------------------------------------
+
+export async function claimPoolTask(
+  taskId: string,
+): Promise<{ error: string } | { data: 'ok' }> {
+  if (!z.string().uuid().safeParse(taskId).success) return { error: 'Invalid task ID' };
+
+  const result = await requireOrgMember();
+  if (!result.ok) return { error: result.error };
+
+  const task = await db.query.tasks.findFirst({
+    where: (t, { and, eq }) =>
+      and(eq(t.id, taskId), eq(t.org_id, result.profile.org_id), eq(t.is_active, true)),
+    columns: { id: true, is_open_pool: true, assignee_id: true, org_id: true, status: true },
+  });
+
+  if (!task) return { error: 'Task not found' };
+  if (!task.is_open_pool) return { error: 'This task is not in the open pool' };
+  if (task.status === 'completed') return { error: 'Task is already completed' };
+  if (task.assignee_id === result.profile.id) return { error: 'You already own this task' };
+
+  const userId = result.profile.id;
+
+  // Atomic conditional update — only succeeds if assignee_id is still NULL or
+  // already this user at the moment the DB executes the statement. This prevents
+  // a race where two concurrent claims both pass the application-level check and
+  // the second silently overwrites the first.
+  const updated = await db
+    .update(tasks)
+    .set({ assignee_id: userId, updated_at: new Date() })
+    .where(
       and(
-        eq(ta.task_id, task_id),
-        eq(ta.user_id, ctx.userId),
-        eq(ta.access_level, 'owner'),
-      ),
-    columns: { id: true },
-  });
-  if (!ownerAccess) return { error: 'Forbidden: only task owner can delete this task' };
+        eq(tasks.id, taskId),
+        eq(tasks.is_open_pool, true),
+        or(isNull(tasks.assignee_id), eq(tasks.assignee_id, userId)),
+      )
+    )
+    .returning({ id: tasks.id });
 
-  try {
-    const [deactivated] = await db
-      .update(tasks)
-      .set({ is_active: false, updated_at: new Date() })
-      .where(and(eq(tasks.id, task_id), eq(tasks.org_id, ctx.orgId)))
-      .returning({ id: tasks.id });
-
-    if (!deactivated) return { error: 'Task not found' };
-    return { data: true };
-  } catch (err) {
-    console.error('[deactivateTask]', err);
-    return { error: 'Failed to deactivate task' };
+  if (updated.length === 0) {
+    return { error: 'This task was just claimed by someone else. Refresh to see the latest.' };
   }
+
+  await db
+    .insert(task_access)
+    .values({ task_id: taskId, user_id: userId, level: 'editor', granted_by: userId })
+    .onConflictDoNothing();
+
+  await insertAuditLog({
+    task_id:  taskId,
+    org_id:   task.org_id,
+    actor_id: userId,
+    action:   'reassigned',
+    payload:  { from: task.assignee_id, to: userId, via: 'pool_claim' },
+  });
+
+  return { data: 'ok' };
 }
 
 // ---------------------------------------------------------------------------
-// getTaskMessages — for realtime chat hydration on first load
+// getTaskMessages — load full message history for a task (server-side initial
+// load; Realtime handles incremental updates after that)
 // ---------------------------------------------------------------------------
 
-export async function getTaskMessages(
-  task_id: string,
-): Promise<{ data: { id: string; task_id: string; content: string | null; file_url: string | null; file_name: string | null; sender_id: string; created_at: Date; sender: Profile }[] } | { error: string }> {
-  const ctx = await resolveUser();
-  if (isErrorResult(ctx)) return ctx;
+export async function getTaskMessages(taskId: string): Promise<{ error: string; data: null } | { error: null; data: TaskMessageWithSender[] }> {
+  if (!z.string().uuid().safeParse(taskId).success) {
+    return { error: 'Invalid task ID', data: null };
+  }
 
-  const idParsed = z.string().uuid().safeParse(task_id);
-  if (!idParsed.success) return { error: 'Invalid task id' };
+  const result = await requireOrgMember();
+  if (!result.ok) return { error: result.error, data: null };
 
-  // Verify access
-  const access = await db.query.task_access.findFirst({
-    where: (ta, { and, eq }) =>
-      and(eq(ta.task_id, task_id), eq(ta.user_id, ctx.userId)),
-    columns: { access_level: true },
+  const task = await db.query.tasks.findFirst({
+    where: (t, { and, eq }) =>
+      and(eq(t.id, taskId), eq(t.org_id, result.profile.org_id), eq(t.is_active, true)),
+    columns: { id: true, is_open_pool: true },
+  });
+  if (!task) return { error: 'Task not found', data: null };
+
+  const myAccess = await getTaskAccess(taskId, result.profile.id);
+  if (!myAccess && !task.is_open_pool) return { error: 'Access denied', data: null };
+
+  const rows = await db.query.task_messages.findMany({
+    where: (m, { eq }) => eq(m.task_id, taskId),
+    orderBy: (m, { asc }) => [asc(m.created_at)],
   });
 
-  // Also allow pool tasks (visible to all org members)
-  if (!access) {
-    const poolTask = await db.query.tasks.findFirst({
-      where: (t, { and, eq }) =>
-        and(eq(t.id, task_id), eq(t.org_id, ctx.orgId), eq(t.is_open_pool, true)),
-      columns: { id: true },
-    });
-    if (!poolTask) return { error: 'Forbidden: no access to this task' };
-  }
+  if (rows.length === 0) return { error: null, data: [] };
 
-  try {
-    const messages = await db.query.task_messages.findMany({
-      where: (m, { eq }) => eq(m.task_id, task_id),
-      with: { sender: true },
-      orderBy: (m, { asc }) => [asc(m.created_at)],
-    });
+  const senderIds = [...new Set(rows.map((r) => r.sender_id))];
+  const senders   = await db.query.profiles.findMany({
+    where: (p, { inArray }) => inArray(p.id, senderIds),
+    columns: { id: true, full_name: true },
+  });
+  const senderMap = new Map(senders.map((s) => [s.id, s]));
 
-    return {
-      data: messages.map((m) => ({
-        id: m.id,
-        task_id: m.task_id,
-        content: m.content,
-        file_url: m.file_url,
-        file_name: m.file_name,
-        sender_id: m.sender_id,
-        created_at: m.created_at,
-        sender: m.sender as Profile,
-      })),
-    };
-  } catch (err) {
-    console.error('[getTaskMessages]', err);
-    return { error: 'Failed to fetch messages' };
-  }
+  const data: TaskMessageWithSender[] = rows.map((r) => ({
+    ...r,
+    sender: senderMap.get(r.sender_id) ?? { id: r.sender_id, full_name: 'Unknown' },
+  }));
+
+  return { error: null, data };
 }
 
-// Re-export inArray so callers don't need direct drizzle-orm import for task queries
-export { inArray };
+// ---------------------------------------------------------------------------
+// sendMessage — any user with any access level (or open pool) can send
+// ---------------------------------------------------------------------------
+
+export async function sendMessage(
+  taskId: string,
+  body:   string,
+): Promise<{ error: string } | { data: TaskMessageWithSender }> {
+  if (!z.string().uuid().safeParse(taskId).success) return { error: 'Invalid task ID' };
+
+  const trimmed = body.trim();
+  if (!trimmed)               return { error: 'Message cannot be empty' };
+  if (trimmed.length > 4000)  return { error: 'Message too long (max 4000 characters)' };
+
+  const result = await requireOrgMember();
+  if (!result.ok) return { error: result.error };
+
+  const task = await db.query.tasks.findFirst({
+    where: (t, { and, eq }) =>
+      and(eq(t.id, taskId), eq(t.org_id, result.profile.org_id), eq(t.is_active, true)),
+    columns: { id: true, is_open_pool: true, org_id: true },
+  });
+  if (!task) return { error: 'Task not found' };
+
+  const myAccess = await getTaskAccess(taskId, result.profile.id);
+  if (!myAccess && !task.is_open_pool) return { error: 'Access denied' };
+
+  const [msg] = await db
+    .insert(task_messages)
+    .values({
+      task_id:   taskId,
+      org_id:    task.org_id,
+      sender_id: result.profile.id,
+      body:      trimmed,
+    })
+    .returning();
+
+  await insertAuditLog({
+    task_id:  taskId,
+    org_id:   task.org_id,
+    actor_id: result.profile.id,
+    action:   'comment_added',
+  });
+
+  return {
+    data: {
+      ...msg,
+      sender: { id: result.profile.id, full_name: result.profile.full_name },
+    },
+  };
+}

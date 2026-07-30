@@ -1,384 +1,308 @@
 'use server';
+import 'server-only';
 
+import { and, count, eq, gt, gte, lt, lte, ne, isNotNull } from 'drizzle-orm';
 import { db } from '@/db';
-import { tasks, task_access, profiles } from '@/db/schema';
-import { eq, and, lt, gte, lte, count, inArray, ne } from 'drizzle-orm';
+import { tasks, profiles, clients } from '@/db/schema';
 import { getCurrentUser } from '@/lib/auth/getUser';
-import { addDays, startOfMonth, endOfMonth } from 'date-fns';
 
 // ---------------------------------------------------------------------------
-// Types
+// Exported types — consumed by the dashboard components
 // ---------------------------------------------------------------------------
 
 export type DashboardStats = {
-  totalTasks: number;
-  overdueTasks: number;
-  dueSoonTasks: number;
+  totalTasks:         number;
+  overdueTasks:       number;
+  dueSoonTasks:       number;   // due within 7 days, not yet completed
   completedThisMonth: number;
-  underReview: number;
+  underReview:        number;
 };
 
 export type OverdueTask = {
-  id: string;
-  title: string;
-  due_at: Date;
+  id:         string;
+  title:      string;
   daysOverdue: number;
-  assignee: { id: string; full_name: string } | null;
-  client: { name: string } | null;
+  assignee:   { id: string; full_name: string } | null;
+  client:     { id: string; name: string } | null;
 };
 
 export type WorkloadEntry = {
-  userId: string;
-  userName: string;
-  inProgress: number;
+  userId:      string;
+  userName:    string;
+  inProgress:  number;
   underReview: number;
 };
 
 export type UpcomingDeadline = {
-  id: string;
-  title: string;
+  id:     string;
+  title:  string;
   due_at: Date;
-  daysLeft: number;
-  client: { name: string } | null;
-  assignee: { full_name: string } | null;
+  client: { id: string; name: string } | null;
+};
+
+export type DashboardData = {
+  stats:     DashboardStats;
+  overdue:   OverdueTask[];
+  workload:  WorkloadEntry[];
+  deadlines: UpcomingDeadline[];
 };
 
 // ---------------------------------------------------------------------------
-// Internal helpers
+// getDashboardData — single function, all queries run in parallel
 // ---------------------------------------------------------------------------
 
-type UserContext = { userId: string; orgId: string };
-
-async function resolveUser(): Promise<UserContext | { error: string }> {
+export async function getDashboardData(): Promise<
+  { error: string; data: null } | { error: null; data: DashboardData }
+> {
   const user = await getCurrentUser();
-  if (!user) return { error: 'Unauthorized' };
+  if (!user) return { error: 'Not authenticated', data: null };
 
   const profile = await db.query.profiles.findFirst({
     where: (p, { eq }) => eq(p.id, user.id),
-    columns: { id: true, org_id: true },
+    columns: { org_id: true, is_org_admin: true },
+  });
+  if (!profile) return { error: 'Profile not found', data: null };
+
+  const orgId = profile.org_id;
+  const now   = new Date();
+
+  // Week boundary — 7 days from now at end of day
+  const weekEnd = new Date(now);
+  weekEnd.setDate(weekEnd.getDate() + 7);
+  weekEnd.setHours(23, 59, 59, 999);
+
+  // Month boundary — first day of current month at midnight
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  // Run all heavy queries in parallel
+  const [
+    totalRow,
+    overdueRow,
+    dueSoonRow,
+    completedRow,
+    underReviewRow,
+    overdueTaskRows,
+    activeTaskRows,
+    deadlineRows,
+  ] = await Promise.all([
+    // 1. Total active tasks
+    db
+      .select({ value: count() })
+      .from(tasks)
+      .where(and(eq(tasks.org_id, orgId), eq(tasks.is_active, true), ne(tasks.status, 'completed'))),
+
+    // 2. Overdue count
+    db
+      .select({ value: count() })
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.org_id, orgId),
+          eq(tasks.is_active, true),
+          ne(tasks.status, 'completed'),
+          isNotNull(tasks.due_at),
+          lt(tasks.due_at, now),
+        ),
+      ),
+
+    // 3. Due within 7 days (not overdue, not completed)
+    db
+      .select({ value: count() })
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.org_id, orgId),
+          eq(tasks.is_active, true),
+          ne(tasks.status, 'completed'),
+          isNotNull(tasks.due_at),
+          gte(tasks.due_at, now),
+          lte(tasks.due_at, weekEnd),
+        ),
+      ),
+
+    // 4. Completed this month
+    db
+      .select({ value: count() })
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.org_id, orgId),
+          eq(tasks.is_active, true),
+          eq(tasks.status, 'completed'),
+          gte(tasks.updated_at, monthStart),
+        ),
+      ),
+
+    // 5. Under review count
+    db
+      .select({ value: count() })
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.org_id, orgId),
+          eq(tasks.is_active, true),
+          eq(tasks.status, 'under_review'),
+        ),
+      ),
+
+    // 6. Full overdue task rows (for the table)
+    db
+      .select({
+        id:          tasks.id,
+        title:       tasks.title,
+        due_at:      tasks.due_at,
+        assignee_id: tasks.assignee_id,
+        client_id:   tasks.client_id,
+      })
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.org_id, orgId),
+          eq(tasks.is_active, true),
+          ne(tasks.status, 'completed'),
+          isNotNull(tasks.due_at),
+          lt(tasks.due_at, now),
+        ),
+      )
+      .orderBy(tasks.due_at),   // oldest due_at first = most overdue first
+
+    // 7. Active (in_progress + under_review) tasks for workload chart
+    db
+      .select({
+        assignee_id: tasks.assignee_id,
+        status:      tasks.status,
+      })
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.org_id, orgId),
+          eq(tasks.is_active, true),
+          isNotNull(tasks.assignee_id),
+        ),
+      ),
+
+    // 8. Upcoming deadlines — next 60 days (for calendar)
+    db
+      .select({
+        id:       tasks.id,
+        title:    tasks.title,
+        due_at:   tasks.due_at,
+        client_id: tasks.client_id,
+      })
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.org_id, orgId),
+          eq(tasks.is_active, true),
+          ne(tasks.status, 'completed'),
+          isNotNull(tasks.due_at),
+          gte(tasks.due_at, now),
+          lte(tasks.due_at, new Date(now.getTime() + 60 * 24 * 60 * 60 * 1000)),
+        ),
+      )
+      .orderBy(tasks.due_at),
+  ]);
+
+  // ---------------------------------------------------------------------------
+  // Resolve assignee and client names in two batch queries
+  // ---------------------------------------------------------------------------
+
+  const assigneeIds = [
+    ...new Set(overdueTaskRows.map((t) => t.assignee_id).filter(Boolean) as string[]),
+  ];
+  const clientIds = [
+    ...new Set(
+      [...overdueTaskRows, ...deadlineRows]
+        .map((t) => t.client_id)
+        .filter(Boolean) as string[],
+    ),
+  ];
+  const workloadAssigneeIds = [
+    ...new Set(activeTaskRows.map((t) => t.assignee_id).filter(Boolean) as string[]),
+  ];
+  const allProfileIds = [...new Set([...assigneeIds, ...workloadAssigneeIds])];
+
+  const [profileRows, clientRows] = await Promise.all([
+    allProfileIds.length > 0
+      ? db.query.profiles.findMany({
+          where: (p, { inArray }) => inArray(p.id, allProfileIds),
+          columns: { id: true, full_name: true },
+        })
+      : Promise.resolve([]),
+    clientIds.length > 0
+      ? db.query.clients.findMany({
+          where: (c, { inArray }) => inArray(c.id, clientIds),
+          columns: { id: true, name: true },
+        })
+      : Promise.resolve([]),
+  ]);
+
+  const profileMap = new Map(profileRows.map((p) => [p.id, p]));
+  const clientMap  = new Map(clientRows.map((c) => [c.id, c]));
+
+  // ---------------------------------------------------------------------------
+  // Build overdue list
+  // ---------------------------------------------------------------------------
+
+  const overdue: OverdueTask[] = overdueTaskRows.map((t) => {
+    const msOverdue  = now.getTime() - new Date(t.due_at!).getTime();
+    const daysOverdue = Math.max(1, Math.floor(msOverdue / (1000 * 60 * 60 * 24)));
+    return {
+      id:          t.id,
+      title:       t.title,
+      daysOverdue,
+      assignee:    t.assignee_id ? (profileMap.get(t.assignee_id) ?? null) : null,
+      client:      t.client_id  ? (clientMap.get(t.client_id)   ?? null) : null,
+    };
   });
 
-  if (!profile) return { error: 'Profile not found' };
-  return { userId: user.id, orgId: profile.org_id };
-}
+  // ---------------------------------------------------------------------------
+  // Build workload chart — count in_progress and under_review per assignee
+  // ---------------------------------------------------------------------------
 
-function isErrorResult(v: unknown): v is { error: string } {
-  return typeof v === 'object' && v !== null && 'error' in v;
-}
-
-// ---------------------------------------------------------------------------
-// getDashboardStats
-// ---------------------------------------------------------------------------
-
-export async function getDashboardStats(): Promise<
-  { data: DashboardStats } | { error: string }
-> {
-  const ctx = await resolveUser();
-  if (isErrorResult(ctx)) return ctx;
-
-  try {
-    // Fetch task IDs the caller has access to
-    const accessRows = await db
-      .select({ task_id: task_access.task_id })
-      .from(task_access)
-      .where(eq(task_access.user_id, ctx.userId));
-
-    if (accessRows.length === 0) {
-      return {
-        data: {
-          totalTasks: 0,
-          overdueTasks: 0,
-          dueSoonTasks: 0,
-          completedThisMonth: 0,
-          underReview: 0,
-        },
-      };
+  const workloadMap = new Map<string, { inProgress: number; underReview: number }>();
+  for (const t of activeTaskRows) {
+    if (!t.assignee_id) continue;
+    if (!workloadMap.has(t.assignee_id)) {
+      workloadMap.set(t.assignee_id, { inProgress: 0, underReview: 0 });
     }
-
-    const taskIds = accessRows.map((r) => r.task_id);
-    const now = new Date();
-    const soonDate = addDays(now, 7);
-    const monthStart = startOfMonth(now);
-    const monthEnd = endOfMonth(now);
-
-    const [total, overdue, dueSoon, completedMonth, review] = await Promise.all([
-      db
-        .select({ count: count() })
-        .from(tasks)
-        .where(
-          and(
-            inArray(tasks.id, taskIds),
-            eq(tasks.is_active, true),
-          ),
-        )
-        .then((r) => Number(r[0]?.count ?? 0)),
-
-      db
-        .select({ count: count() })
-        .from(tasks)
-        .where(
-          and(
-            inArray(tasks.id, taskIds),
-            eq(tasks.is_active, true),
-            lt(tasks.due_at, now),
-          ),
-        )
-        .then((r) => Number(r[0]?.count ?? 0)),
-
-      db
-        .select({ count: count() })
-        .from(tasks)
-        .where(
-          and(
-            inArray(tasks.id, taskIds),
-            eq(tasks.is_active, true),
-            gte(tasks.due_at, now),
-            lte(tasks.due_at, soonDate),
-          ),
-        )
-        .then((r) => Number(r[0]?.count ?? 0)),
-
-      db
-        .select({ count: count() })
-        .from(tasks)
-        .where(
-          and(
-            inArray(tasks.id, taskIds),
-            eq(tasks.is_active, true),
-            eq(tasks.status, 'completed'),
-            gte(tasks.updated_at, monthStart),
-            lte(tasks.updated_at, monthEnd),
-          ),
-        )
-        .then((r) => Number(r[0]?.count ?? 0)),
-
-      db
-        .select({ count: count() })
-        .from(tasks)
-        .where(
-          and(
-            inArray(tasks.id, taskIds),
-            eq(tasks.is_active, true),
-            eq(tasks.status, 'under_review'),
-          ),
-        )
-        .then((r) => Number(r[0]?.count ?? 0)),
-    ]);
-
-    return {
-      data: {
-        totalTasks: total,
-        overdueTasks: overdue,
-        dueSoonTasks: dueSoon,
-        completedThisMonth: completedMonth,
-        underReview: review,
-      },
-    };
-  } catch (err) {
-    console.error('[getDashboardStats]', err);
-    return { error: 'Failed to load dashboard stats' };
+    const entry = workloadMap.get(t.assignee_id)!;
+    if (t.status === 'in_progress')  entry.inProgress++;
+    if (t.status === 'under_review') entry.underReview++;
   }
-}
 
-// ---------------------------------------------------------------------------
-// getOverdueTasks
-// Admin / manager view: shows overdue tasks across the caller's org, scoped to
-// tasks the caller has access to (task_access row). Limit 20, oldest-first.
-// ---------------------------------------------------------------------------
+  const workload: WorkloadEntry[] = [...workloadMap.entries()]
+    .map(([userId, counts]) => ({
+      userId,
+      userName:    profileMap.get(userId)?.full_name ?? 'Unknown',
+      inProgress:  counts.inProgress,
+      underReview: counts.underReview,
+    }))
+    .filter((e) => e.inProgress + e.underReview > 0)
+    .sort((a, b) => (b.inProgress + b.underReview) - (a.inProgress + a.underReview));
 
-export async function getOverdueTasks(): Promise<
-  { data: OverdueTask[] } | { error: string }
-> {
-  const ctx = await resolveUser();
-  if (isErrorResult(ctx)) return ctx;
+  // ---------------------------------------------------------------------------
+  // Build deadline calendar events
+  // ---------------------------------------------------------------------------
 
-  try {
-    const accessRows = await db
-      .select({ task_id: task_access.task_id })
-      .from(task_access)
-      .where(eq(task_access.user_id, ctx.userId));
+  const deadlines: UpcomingDeadline[] = deadlineRows.map((t) => ({
+    id:     t.id,
+    title:  t.title,
+    due_at: t.due_at!,
+    client: t.client_id ? (clientMap.get(t.client_id) ?? null) : null,
+  }));
 
-    if (accessRows.length === 0) return { data: [] };
+  // ---------------------------------------------------------------------------
+  // Compose stats
+  // ---------------------------------------------------------------------------
 
-    const taskIds = accessRows.map((r) => r.task_id);
-    const now = new Date();
+  const stats: DashboardStats = {
+    totalTasks:         totalRow[0]?.value       ?? 0,
+    overdueTasks:       overdueRow[0]?.value      ?? 0,
+    dueSoonTasks:       dueSoonRow[0]?.value      ?? 0,
+    completedThisMonth: completedRow[0]?.value    ?? 0,
+    underReview:        underReviewRow[0]?.value  ?? 0,
+  };
 
-    const result = await db.query.tasks.findMany({
-      where: (t, { and, eq, lt, isNotNull }) =>
-        and(
-          inArray(t.id, taskIds),
-          eq(t.is_active, true),
-          isNotNull(t.due_at),
-          lt(t.due_at, now),
-          ne(t.status, 'completed'),
-        ),
-      with: {
-        assignee: { columns: { id: true, full_name: true } },
-        client: { columns: { name: true } },
-      },
-      orderBy: (t, { asc }) => [asc(t.due_at)],
-      limit: 20,
-    });
-
-    const data: OverdueTask[] = result
-      .map((t) => ({
-        id: t.id,
-        title: t.title,
-        due_at: t.due_at!,
-        daysOverdue: Math.floor(
-          (now.getTime() - new Date(t.due_at!).getTime()) / 86_400_000,
-        ),
-        assignee: t.assignee
-          ? { id: t.assignee.id, full_name: t.assignee.full_name }
-          : null,
-        client: t.client ? { name: t.client.name } : null,
-      }));
-
-    return { data };
-  } catch (err) {
-    console.error('[getOverdueTasks]', err);
-    return { error: 'Failed to load overdue tasks' };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// getWorkload
-// Returns per-user in_progress + under_review counts for the caller's org.
-// Only returns entries where at least one task is active.
-// ---------------------------------------------------------------------------
-
-export async function getWorkload(): Promise<
-  { data: WorkloadEntry[] } | { error: string }
-> {
-  const ctx = await resolveUser();
-  if (isErrorResult(ctx)) return ctx;
-
-  try {
-    const orgUsers = await db.query.profiles.findMany({
-      where: (p, { and, eq }) =>
-        and(eq(p.org_id, ctx.orgId), eq(p.is_active, true)),
-      columns: { id: true, full_name: true },
-    });
-
-    if (orgUsers.length === 0) return { data: [] };
-
-    const userIds = orgUsers.map((u) => u.id);
-
-    // Single query per status to avoid N+1 — then merge in memory
-    const [inProgressRows, underReviewRows] = await Promise.all([
-      db
-        .select({ assignee_id: tasks.assignee_id, cnt: count() })
-        .from(tasks)
-        .where(
-          and(
-            eq(tasks.org_id, ctx.orgId),
-            eq(tasks.is_active, true),
-            eq(tasks.status, 'in_progress'),
-            inArray(tasks.assignee_id, userIds),
-          ),
-        )
-        .groupBy(tasks.assignee_id),
-
-      db
-        .select({ assignee_id: tasks.assignee_id, cnt: count() })
-        .from(tasks)
-        .where(
-          and(
-            eq(tasks.org_id, ctx.orgId),
-            eq(tasks.is_active, true),
-            eq(tasks.status, 'under_review'),
-            inArray(tasks.assignee_id, userIds),
-          ),
-        )
-        .groupBy(tasks.assignee_id),
-    ]);
-
-    const inProgressMap = new Map<string, number>();
-    for (const r of inProgressRows) {
-      if (r.assignee_id) inProgressMap.set(r.assignee_id, Number(r.cnt));
-    }
-
-    const underReviewMap = new Map<string, number>();
-    for (const r of underReviewRows) {
-      if (r.assignee_id) underReviewMap.set(r.assignee_id, Number(r.cnt));
-    }
-
-    const workload: WorkloadEntry[] = orgUsers
-      .map((u) => ({
-        userId: u.id,
-        userName: u.full_name,
-        inProgress: inProgressMap.get(u.id) ?? 0,
-        underReview: underReviewMap.get(u.id) ?? 0,
-      }))
-      .filter((e) => e.inProgress + e.underReview > 0)
-      .sort(
-        (a, b) =>
-          b.inProgress + b.underReview - (a.inProgress + a.underReview),
-      );
-
-    return { data: workload };
-  } catch (err) {
-    console.error('[getWorkload]', err);
-    return { error: 'Failed to load workload' };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// getUpcomingDeadlines
-// Returns tasks due within the next `days` days (default 14) that the caller
-// has access to, excluding completed tasks, sorted by due_at asc.
-// ---------------------------------------------------------------------------
-
-export async function getUpcomingDeadlines(
-  days = 14,
-): Promise<{ data: UpcomingDeadline[] } | { error: string }> {
-  const ctx = await resolveUser();
-  if (isErrorResult(ctx)) return ctx;
-
-  try {
-    const accessRows = await db
-      .select({ task_id: task_access.task_id })
-      .from(task_access)
-      .where(eq(task_access.user_id, ctx.userId));
-
-    if (accessRows.length === 0) return { data: [] };
-
-    const taskIds = accessRows.map((r) => r.task_id);
-    const now = new Date();
-    const future = addDays(now, days);
-
-    const result = await db.query.tasks.findMany({
-      where: (t, { and, eq, gte, lte, isNotNull }) =>
-        and(
-          inArray(t.id, taskIds),
-          eq(t.is_active, true),
-          isNotNull(t.due_at),
-          gte(t.due_at, now),
-          lte(t.due_at, future),
-          ne(t.status, 'completed'),
-        ),
-      with: {
-        client: { columns: { name: true } },
-        assignee: { columns: { full_name: true } },
-      },
-      orderBy: (t, { asc }) => [asc(t.due_at)],
-    });
-
-    const data: UpcomingDeadline[] = result
-      .map((t) => ({
-        id: t.id,
-        title: t.title,
-        due_at: t.due_at!,
-        daysLeft: Math.ceil(
-          (new Date(t.due_at!).getTime() - now.getTime()) / 86_400_000,
-        ),
-        client: t.client ? { name: t.client.name } : null,
-        assignee: t.assignee ? { full_name: t.assignee.full_name } : null,
-      }));
-
-    return { data };
-  } catch (err) {
-    console.error('[getUpcomingDeadlines]', err);
-    return { error: 'Failed to load upcoming deadlines' };
-  }
+  return { error: null, data: { stats, overdue, workload, deadlines } };
 }

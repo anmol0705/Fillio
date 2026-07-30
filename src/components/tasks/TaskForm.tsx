@@ -1,265 +1,230 @@
 'use client';
 
-import { useState } from 'react';
-import { useForm } from 'react-hook-form';
-import { zodResolver } from '@hookform/resolvers/zod';
-import { z } from 'zod';
-import { toast } from 'sonner';
+import { useState, useTransition } from 'react';
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
+  Dialog, DialogContent, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
 import { createTask } from '@/actions/tasks';
-import { taskTypeValues, taskPriorityValues } from '@/lib/validations/task';
-import { useRouter } from 'next/navigation';
-import type { Client, Profile } from '@/types';
-
-const TYPE_LABELS: Record<string, string> = {
-  gst: 'GST',
-  tds: 'TDS',
-  income_tax: 'Income Tax',
-  audit: 'Audit',
-  roc_mca: 'ROC/MCA',
-  accounting: 'Accounting',
-  payroll: 'Payroll',
-  notice: 'Notice',
-  advisory: 'Advisory',
-  other: 'Other',
-};
-
-const formSchema = z.object({
-  title: z.string().min(1, 'Title is required').max(500),
-  description: z.string().max(5000).optional(),
-  task_type: z.enum(taskTypeValues, { error: 'Task type is required' }),
-  priority: z.enum(taskPriorityValues),
-  client_id: z.string().optional(),
-  assignee_id: z.string().optional(),
-  financial_year: z.string().max(10).optional(),
-  due_at: z.string().optional(),
-  is_open_pool: z.boolean(),
-});
-
-type FormData = z.infer<typeof formSchema>;
+import type { Client, Profile, TaskListItem } from '@/types';
 
 interface Props {
-  open: boolean;
-  onClose: () => void;
-  clients: Client[];
-  users: Profile[];
+  open:         boolean;
+  onOpenChange: (v: boolean) => void;
+  clients:      Client[];
+  members:      Pick<Profile, 'id' | 'full_name'>[];
+  onCreated:    (task: TaskListItem) => void;
 }
 
-export function TaskForm({ open, onClose, clients, users }: Props) {
-  const router = useRouter();
-  const [serverError, setServerError] = useState('');
+const TASK_TYPES = [
+  { value: 'gst',        label: 'GST' },
+  { value: 'tds',        label: 'TDS' },
+  { value: 'income_tax', label: 'Income Tax' },
+  { value: 'audit',      label: 'Audit' },
+  { value: 'roc_mca',    label: 'ROC / MCA' },
+  { value: 'accounting', label: 'Accounting' },
+  { value: 'payroll',    label: 'Payroll' },
+  { value: 'notice',     label: 'Notice' },
+  { value: 'advisory',   label: 'Advisory' },
+  { value: 'other',      label: 'Other' },
+] as const;
 
-  const {
-    register,
-    handleSubmit,
-    setValue,
-    reset,
-    formState: { errors, isSubmitting },
-  } = useForm<FormData>({
-    resolver: zodResolver(formSchema),
-    defaultValues: { priority: 'medium' as const, is_open_pool: false },
-  });
+const PRIORITIES = [
+  { value: 'urgent', label: 'Urgent' },
+  { value: 'high',   label: 'High' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'low',    label: 'Low' },
+] as const;
 
-  async function onSubmit(data: FormData) {
-    setServerError('');
-    try {
-      const result = await createTask({
-        ...data,
-        client_id: data.client_id || null,
-        assignee_id: data.assignee_id || null,
-        due_at: data.due_at ? new Date(data.due_at).toISOString() : null,
-      });
+export function TaskForm({ open, onOpenChange, clients, members, onCreated }: Props) {
+  const [isPending, startTransition] = useTransition();
+  const [error, setError] = useState('');
 
-      if ('error' in result) {
-        setServerError(result.error);
-        return;
-      }
+  const [title,    setTitle]    = useState('');
+  const [desc,     setDesc]     = useState('');
+  const [type,     setType]     = useState('');
+  const [priority, setPriority] = useState('medium');
+  const [dueAt,    setDueAt]    = useState('');
+  const [clientId, setClientId] = useState('');
+  const [fyear,    setFyear]    = useState('');
+  const [assignee, setAssignee] = useState('');
+  const [isPool,   setIsPool]   = useState(false);
 
-      toast.success('Task created');
-      reset();
-      onClose();
-      router.push(`/dashboard/tasks/${result.data.id}`);
-      router.refresh();
-    } catch (e) {
-      setServerError(e instanceof Error ? e.message : 'Failed to create task');
-    }
+  function reset() {
+    setTitle(''); setDesc(''); setType(''); setPriority('medium');
+    setDueAt(''); setClientId(''); setFyear(''); setAssignee('');
+    setIsPool(false); setError('');
   }
 
-  function handleClose() {
-    reset();
-    setServerError('');
-    onClose();
+  function handleClose(v: boolean) {
+    if (!v) reset();
+    onOpenChange(v);
+  }
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!type) { setError('Task type is required'); return; }
+    setError('');
+
+    startTransition(async () => {
+      const res = await createTask({
+        title:          title.trim(),
+        description:    desc.trim() || undefined,
+        type,
+        priority,
+        due_at:         dueAt ? new Date(dueAt).toISOString() : null,
+        client_id:      clientId || null,
+        financial_year: fyear.trim() || null,
+        assignee_id:    assignee || null,
+        is_open_pool:   isPool,
+      });
+
+      if ('error' in res) { setError(res.error); return; }
+
+      // Build the list item immediately from what we know — no round-trip needed
+      const assigneeMember = members.find((m) => m.id === assignee);
+      const clientItem     = clients.find((c) => c.id === clientId);
+
+      onCreated({
+        id:           res.data.id,
+        title:        title.trim(),
+        type:         type as TaskListItem['type'],
+        status:       'not_started',
+        priority:     priority as TaskListItem['priority'],
+        due_at:       dueAt ? new Date(dueAt) : null,
+        is_open_pool: isPool,
+        created_at:   new Date(),
+        assignee:     assigneeMember ? { id: assigneeMember.id, full_name: assigneeMember.full_name } : null,
+        client:       clientItem    ? { id: clientItem.id,    name: clientItem.name }                : null,
+        my_access:    'owner',
+      });
+
+      reset();
+      onOpenChange(false);
+    });
   }
 
   return (
     <Dialog open={open} onOpenChange={handleClose}>
-      <DialogContent className="w-full max-w-lg mx-4 sm:mx-auto max-h-[90vh] overflow-y-auto">
+      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>Create Task</DialogTitle>
+          <DialogTitle>New Task</DialogTitle>
         </DialogHeader>
-        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4 pt-1">
-          {serverError && (
-            <p className="text-sm text-destructive bg-destructive/10 rounded-md px-3 py-2">
-              {serverError}
-            </p>
-          )}
 
-          <div className="space-y-1.5">
-            <Label htmlFor="title">Title *</Label>
+        <form onSubmit={submit} className="space-y-4 mt-2">
+          {error && <p className="text-sm text-red-600 bg-red-50 rounded px-3 py-2">{error}</p>}
+
+          <div className="space-y-1">
+            <Label htmlFor="tf-title">Title *</Label>
             <Input
-              id="title"
-              {...register('title')}
-              placeholder="e.g. GSTR-1 filing for March 2025"
-              className="min-h-[44px]"
+              id="tf-title"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="e.g. File GST Return for FY 2024-25"
+              required
             />
-            {errors.title && (
-              <p className="text-xs text-destructive">{errors.title.message}</p>
-            )}
           </div>
 
-          {/* Type + Priority — stack on mobile, side-by-side on sm+ */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <Label>Type *</Label>
-              <Select
-                onValueChange={(v) =>
-                  setValue('task_type', v as FormData['task_type'], { shouldValidate: true })
-                }
-              >
-                <SelectTrigger className="w-full min-h-[44px]">
-                  <SelectValue placeholder="Select type" />
-                </SelectTrigger>
-                <SelectContent>
-                  {taskTypeValues.map((t) => (
-                    <SelectItem key={t} value={t}>
-                      {TYPE_LABELS[t]}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {errors.task_type && (
-                <p className="text-xs text-destructive">{errors.task_type.message}</p>
-              )}
-            </div>
-            <div className="space-y-1.5">
-              <Label>Priority</Label>
-              <Select
-                defaultValue="medium"
-                onValueChange={(v) =>
-                  setValue('priority', v as FormData['priority'], { shouldValidate: true })
-                }
-              >
-                <SelectTrigger className="w-full min-h-[44px]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="urgent">Urgent</SelectItem>
-                  <SelectItem value="high">High</SelectItem>
-                  <SelectItem value="medium">Medium</SelectItem>
-                  <SelectItem value="low">Low</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-
-          {/* Client + Assignee — stack on mobile */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <Label>Client</Label>
-              <Select onValueChange={(v) => setValue('client_id', (v as string) ?? '')}>
-                <SelectTrigger className="w-full min-h-[44px]">
-                  <SelectValue placeholder="Select client" />
-                </SelectTrigger>
-                <SelectContent>
-                  {clients.map((c) => (
-                    <SelectItem key={c.id} value={c.id}>
-                      {c.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-1.5">
-              <Label>Assignee</Label>
-              <Select onValueChange={(v) => setValue('assignee_id', (v as string) ?? '')}>
-                <SelectTrigger className="w-full min-h-[44px]">
-                  <SelectValue placeholder="Assign to…" />
-                </SelectTrigger>
-                <SelectContent>
-                  {users.map((u) => (
-                    <SelectItem key={u.id} value={u.id}>
-                      {u.full_name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-
-          {/* Financial Year + Due Date — stack on mobile */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <Label htmlFor="financial_year">Financial Year</Label>
-              <Input
-                id="financial_year"
-                {...register('financial_year')}
-                placeholder="2024-25"
-                className="min-h-[44px]"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="due_at">Due Date</Label>
-              <Input id="due_at" type="date" {...register('due_at')} className="min-h-[44px]" />
-            </div>
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="description">Description</Label>
+          <div className="space-y-1">
+            <Label htmlFor="tf-desc">Description</Label>
             <Textarea
-              id="description"
-              {...register('description')}
-              placeholder="Optional notes…"
+              id="tf-desc"
+              value={desc}
+              onChange={(e) => setDesc(e.target.value)}
+              placeholder="Optional notes..."
               rows={3}
             />
           </div>
 
-          <div className="flex items-center gap-3 py-1">
-            <input
-              type="checkbox"
-              id="open_pool"
-              {...register('is_open_pool')}
-              className="rounded border w-5 h-5 shrink-0"
-            />
-            <Label htmlFor="open_pool" className="font-normal cursor-pointer leading-snug">
-              Add to open pool (anyone can claim this task)
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <Label>Task Type *</Label>
+              <Select value={type} onValueChange={(v) => setType(v ?? '')}>
+                <SelectTrigger><SelectValue placeholder="Select type" /></SelectTrigger>
+                <SelectContent>
+                  {TASK_TYPES.map((t) => (
+                    <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1">
+              <Label>Priority</Label>
+              <Select value={priority} onValueChange={(v) => setPriority(v ?? 'medium')}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {PRIORITIES.map((p) => (
+                    <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <Label htmlFor="tf-due">Due Date</Label>
+              <Input id="tf-due" type="date" value={dueAt} onChange={(e) => setDueAt(e.target.value)} />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="tf-fy">Financial Year</Label>
+              <Input
+                id="tf-fy"
+                value={fyear}
+                onChange={(e) => setFyear(e.target.value)}
+                placeholder="e.g. 2024-25"
+                maxLength={10}
+              />
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <Label>Client</Label>
+            <Select value={clientId} onValueChange={(v) => setClientId(v ?? '')}>
+              <SelectTrigger><SelectValue placeholder="Select client (optional)" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="">— None —</SelectItem>
+                {clients.map((c) => (
+                  <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-1">
+            <Label>Assignee</Label>
+            <Select value={assignee} onValueChange={(v) => setAssignee(v ?? '')}>
+              <SelectTrigger><SelectValue placeholder="Assign to (optional)" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="">— Unassigned —</SelectItem>
+                {members.map((m) => (
+                  <SelectItem key={m.id} value={m.id}>{m.full_name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <Switch id="tf-pool" checked={isPool} onCheckedChange={setIsPool} />
+            <Label htmlFor="tf-pool" className="cursor-pointer">
+              Open Pool — visible to all org members
             </Label>
           </div>
 
-          <DialogFooter className="flex-col-reverse sm:flex-row gap-2">
-            <Button type="button" variant="outline" onClick={handleClose} className="min-h-[44px] w-full sm:w-auto">
-              Cancel
+          <div className="flex justify-end gap-2 pt-2">
+            <Button type="button" variant="outline" onClick={() => handleClose(false)}>Cancel</Button>
+            <Button type="submit" disabled={isPending}>
+              {isPending ? 'Creating…' : 'Create Task'}
             </Button>
-            <Button type="submit" disabled={isSubmitting} className="min-h-[44px] w-full sm:w-auto">
-              {isSubmitting ? 'Creating…' : 'Create Task'}
-            </Button>
-          </DialogFooter>
+          </div>
         </form>
       </DialogContent>
     </Dialog>

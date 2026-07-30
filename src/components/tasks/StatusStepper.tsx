@@ -1,76 +1,82 @@
 'use client';
 
-import { useState } from 'react';
-import { toast } from 'sonner';
+import { useState, useTransition } from 'react';
 import { Button } from '@/components/ui/button';
 import { updateTaskStatus } from '@/actions/tasks';
-import { STATUS_TRANSITIONS } from '@/lib/validations/task';
-import { StatusBadge } from './StatusBadge';
-import type { Task } from '@/types';
-import { useRouter } from 'next/navigation';
+import type { TaskStatus, AccessLevel } from '@/types';
 
-const STATUS_LABELS: Record<string, string> = {
-  in_progress: 'Start Working',
-  under_review: 'Submit for Review',
-  changes_requested: 'Request Changes',
-  approved: 'Approve',
-  filed: 'Mark Filed',
-  completed: 'Complete',
+const NEXT_STATUSES: Partial<Record<TaskStatus, TaskStatus[]>> = {
+  not_started:       ['in_progress'],
+  in_progress:       ['under_review'],
+  under_review:      ['changes_requested', 'approved'],
+  changes_requested: ['in_progress'],
+  approved:          ['filed'],
+  filed:             ['completed'],
 };
 
-interface Props {
-  task: Pick<Task, 'id' | 'status'>;
+function buttonLabel(target: TaskStatus): string {
+  if (target === 'in_progress')       return 'Mark In Progress';
+  if (target === 'under_review')      return 'Submit for Review';
+  if (target === 'changes_requested') return 'Request Changes';
+  if (target === 'approved')          return 'Approve';
+  if (target === 'filed')             return 'Mark Filed';
+  if (target === 'completed')         return 'Mark Completed';
+  return target;
 }
 
-export function StatusStepper({ task }: Props) {
-  const [loading, setLoading] = useState(false);
-  const router = useRouter();
-  const nextStatuses = STATUS_TRANSITIONS[task.status] ?? [];
+interface Props {
+  taskId:         string;
+  status:         TaskStatus;
+  myAccess:       AccessLevel | null;
+  onStatusChange: (newStatus: TaskStatus) => void;
+}
 
-  if (task.status === 'completed') {
+export function StatusStepper({ taskId, status, myAccess, onStatusChange }: Props) {
+  const [isPending, startTransition] = useTransition();
+  const [error, setError] = useState('');
+
+  const canEdit = myAccess === 'owner' || myAccess === 'editor';
+  const nexts   = NEXT_STATUSES[status] ?? [];
+
+  if (!canEdit || nexts.length === 0) {
     return (
-      <div className="flex items-center gap-2">
-        <StatusBadge status={task.status} />
-        <span className="text-xs text-muted-foreground">Task is complete</span>
-      </div>
+      <p className="text-sm text-muted-foreground">
+        {status === 'completed' ? 'Task is completed — no further changes.' : 'No transitions available.'}
+      </p>
     );
   }
 
-  async function handleTransition(next: string) {
-    setLoading(true);
-    try {
-      const result = await updateTaskStatus({
-        task_id: task.id,
-        new_status: next as Task['status'],
-      });
-      if ('error' in result) {
-        toast.error(result.error);
-      } else {
-        toast.success('Status updated');
-        router.refresh();
+  function move(next: TaskStatus) {
+    setError('');
+    // Update parent immediately so StatusBadge reflects the change at once
+    onStatusChange(next);
+
+    startTransition(async () => {
+      const res = await updateTaskStatus(taskId, next);
+      if ('error' in res) {
+        // Revert if server rejected the transition
+        onStatusChange(status);
+        setError(res.error);
       }
-    } catch {
-      toast.error('Failed to update status');
-    } finally {
-      setLoading(false);
-    }
+    });
   }
 
   return (
-    <div className="flex items-center gap-3 flex-wrap">
-      <StatusBadge status={task.status} />
-      {nextStatuses.map((next) => (
-        <Button
-          key={next}
-          size="sm"
-          variant="outline"
-          disabled={loading}
-          onClick={() => handleTransition(next)}
-          className="min-h-[44px]"
-        >
-          {loading ? 'Updating…' : (STATUS_LABELS[next] ?? next)}
-        </Button>
-      ))}
+    <div className="space-y-2">
+      <div className="flex flex-wrap gap-2">
+        {nexts.map((next) => (
+          <Button
+            key={next}
+            size="sm"
+            variant={next === 'changes_requested' ? 'outline' : 'default'}
+            disabled={isPending}
+            onClick={() => move(next)}
+          >
+            {buttonLabel(next)}
+          </Button>
+        ))}
+      </div>
+      {error && <p className="text-xs text-red-600">{error}</p>}
     </div>
   );
 }

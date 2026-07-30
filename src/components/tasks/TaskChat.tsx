@@ -1,204 +1,216 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useEffect, useRef, useState, useTransition } from 'react';
 import { createClient } from '@/lib/supabase/client';
-import { addTaskMessage } from '@/actions/tasks';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
-import { Button } from '@/components/ui/button';
-import { Textarea } from '@/components/ui/textarea';
-import { format } from 'date-fns';
-import { Send } from 'lucide-react';
-import type { Profile } from '@/types';
-
-export type MessageWithSender = {
-  id: string;
-  task_id?: string;
-  sender_id: string;
-  content: string | null;
-  file_url?: string | null;
-  file_name?: string | null;
-  created_at: Date;
-  sender: Pick<Profile, 'id' | 'full_name'>;
-};
+import { sendMessage } from '@/actions/tasks';
+import type { TaskMessageWithSender } from '@/types';
 
 interface Props {
-  taskId: string;
-  currentUserId: string;
-  initialMessages: MessageWithSender[];
+  taskId:          string;
+  currentUserId:   string;
+  currentUserName: string;
+  initialMessages: TaskMessageWithSender[];
+  members:         { id: string; full_name: string }[];
 }
 
-export function TaskChat({ taskId, currentUserId, initialMessages }: Props) {
-  const [messages, setMessages] = useState<MessageWithSender[]>(initialMessages);
-  const [content, setContent] = useState('');
-  const [sending, setSending] = useState(false);
-  const bottomRef = useRef<HTMLDivElement>(null);
-  // createClient() is stable across renders — no need to memoize
-  const supabase = createClient();
+export function TaskChat({ taskId, currentUserId, currentUserName, initialMessages, members }: Props) {
+  const [messages, setMessages]    = useState<TaskMessageWithSender[]>(initialMessages);
+  // Build a lookup so Realtime messages from others resolve to real names
+  const memberMap = new Map(members.map((m) => [m.id, m.full_name]));
+  const [body, setBody]            = useState('');
+  const [error, setError]          = useState('');
+  const [isPending, startTransition] = useTransition();
 
-  // Auto-scroll to bottom whenever messages change
+  const bottomRef   = useRef<HTMLDivElement>(null);
+  // Tracks IDs of messages we sent ourselves so we can skip the Realtime echo
+  const sentIds     = useRef<Set<string>>(new Set());
+
+  // ---------------------------------------------------------------------------
+  // Auto-scroll to bottom whenever the message list grows
+  // ---------------------------------------------------------------------------
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Supabase Realtime subscription — one channel per taskId
+  // ---------------------------------------------------------------------------
+  // Supabase Realtime subscription
+  //
+  // We subscribe to INSERT events on task_messages filtered by task_id.
+  // When a new row arrives:
+  //   - If its ID is in sentIds (we sent it, already in state) → skip (dedup)
+  //   - Otherwise → append to messages list
+  //
+  // The channel is cleaned up when the component unmounts (navigation away).
+  // ---------------------------------------------------------------------------
   useEffect(() => {
+    const supabase = createClient();
+
     const channel = supabase
       .channel(`task-chat-${taskId}`)
       .on(
         'postgres_changes',
         {
-          event: 'INSERT',
+          event:  'INSERT',
           schema: 'public',
-          table: 'task_messages',
+          table:  'task_messages',
           filter: `task_id=eq.${taskId}`,
         },
         (payload) => {
-          // CDC payload has the raw DB row shape
           const row = payload.new as {
-            id: string;
-            task_id: string;
-            sender_id: string;
-            content: string | null;
-            file_url: string | null;
-            file_name: string | null;
-            created_at: string;
+            id: string; task_id: string; org_id: string;
+            sender_id: string; body: string; created_at: string;
           };
-          setMessages((prev) => {
-            // Guard against duplicates (e.g. own message echoed back via CDC)
-            if (prev.some((m) => m.id === row.id)) return prev;
-            const withSender: MessageWithSender = {
-              id: row.id,
-              task_id: row.task_id,
-              sender_id: row.sender_id,
-              content: row.content,
-              file_url: row.file_url,
-              file_name: row.file_name,
-              // created_at comes as ISO string from CDC — convert to Date
+
+          // Skip the echo of our own message — we already added it optimistically
+          if (sentIds.current.has(row.id)) {
+            sentIds.current.delete(row.id);
+            return;
+          }
+
+          // Resolve sender name from the members map loaded on mount
+          const senderName = memberMap.get(row.sender_id) ?? 'Team member';
+          setMessages((prev) => [
+            ...prev,
+            {
+              ...row,
               created_at: new Date(row.created_at),
-              // Sender profile is not available from CDC; use stub.
-              // Initials fall back to the last 2 chars of sender_id.
-              sender: { id: row.sender_id, full_name: '' },
-            };
-            return [...prev, withSender];
-          });
+              sender: { id: row.sender_id, full_name: senderName },
+            },
+          ]);
         },
       )
-      .subscribe((status, err) => {
-        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-          console.error(JSON.stringify({ level: 'error', component: 'TaskChat', status, err: err?.message }));
-        }
-      });
+      .subscribe();
 
-    // CRITICAL: clean up on unmount to prevent zombie subscriptions
     return () => {
       supabase.removeChannel(channel);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskId]);
 
-  async function handleSend() {
-    const trimmed = content.trim();
-    if (!trimmed || sending) return;
+  // ---------------------------------------------------------------------------
+  // Send
+  // ---------------------------------------------------------------------------
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!body.trim() || isPending) return;
+    setError('');
 
-    setSending(true);
-    setContent('');
-    try {
-      const result = await addTaskMessage({ task_id: taskId, content: trimmed });
-      if ('error' in result) {
-        // Restore content so the user doesn't lose their message
-        setContent(trimmed);
-        console.error('[TaskChat] addTaskMessage error:', result.error);
+    const optimisticMsg: TaskMessageWithSender = {
+      id:         crypto.randomUUID(),
+      task_id:    taskId,
+      org_id:     '',
+      sender_id:  currentUserId,
+      body:       body.trim(),
+      created_at: new Date(),
+      sender:     { id: currentUserId, full_name: currentUserName },
+    };
+
+    // Add to UI immediately so the sender doesn't wait for the server
+    setMessages((prev) => [...prev, optimisticMsg]);
+    const draft = body.trim();
+    setBody('');
+
+    startTransition(async () => {
+      const res = await sendMessage(taskId, draft);
+      if ('error' in res) {
+        // Remove the optimistic message and show the error
+        setMessages((prev) => prev.filter((m) => m.id !== optimisticMsg.id));
+        setError(res.error);
+        setBody(draft); // restore so user can retry
+        return;
       }
-    } finally {
-      setSending(false);
-    }
+      // Server confirmed — register real ID so Realtime echo is skipped,
+      // then replace the optimistic placeholder with the real row
+      sentIds.current.add(res.data.id);
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === optimisticMsg.id
+            ? { ...res.data, sender: { id: currentUserId, full_name: currentUserName } }
+            : m
+        )
+      );
+    });
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    // Ctrl/Cmd + Enter submits; plain Enter adds a newline
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
       e.preventDefault();
-      handleSend();
+      handleSubmit(e as unknown as React.FormEvent);
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
   return (
-    <div className="flex flex-col h-[400px] lg:h-[500px]">
-      <h2 className="text-sm font-semibold mb-3 flex-shrink-0">Discussion</h2>
-
-      {/* Messages list */}
-      <div className="flex-1 overflow-y-auto space-y-3 pr-1 min-h-0">
-        {messages.length === 0 ? (
+    <div className="flex flex-col h-full min-h-[400px] max-h-[600px]">
+      {/* Message list */}
+      <div className="flex-1 overflow-y-auto space-y-3 pr-1 pb-2">
+        {messages.length === 0 && (
           <p className="text-sm text-muted-foreground text-center py-8">
             No messages yet. Start the conversation.
           </p>
-        ) : (
-          messages.map((msg) => {
-            const isOwn = msg.sender_id === currentUserId;
-            const name = msg.sender?.full_name ?? '';
-            const initials = name
-              ? name
-                  .split(' ')
-                  .map((n) => n[0])
-                  .join('')
-                  .slice(0, 2)
-                  .toUpperCase()
-              : msg.sender_id.slice(-2).toUpperCase();
-
-            return (
-              <div
-                key={msg.id}
-                className={`flex gap-2 ${isOwn ? 'flex-row-reverse' : 'flex-row'}`}
-              >
-                <Avatar className="w-7 h-7 flex-shrink-0">
-                  <AvatarFallback className="text-xs">{initials}</AvatarFallback>
-                </Avatar>
-                <div
-                  className={`max-w-[75%] flex flex-col gap-0.5 ${
-                    isOwn ? 'items-end' : 'items-start'
-                  }`}
-                >
-                  <div
-                    className={`rounded-lg px-3 py-2 text-sm whitespace-pre-wrap break-words ${
-                      isOwn
-                        ? 'bg-primary text-primary-foreground'
-                        : 'bg-muted text-foreground'
-                    }`}
-                  >
-                    {msg.content}
-                  </div>
-                  <span className="text-xs text-muted-foreground">
-                    {format(new Date(msg.created_at), 'h:mm a')}
-                  </span>
-                </div>
-              </div>
-            );
-          })
         )}
-        {/* Sentinel element — scrolled into view on each new message */}
+
+        {messages.map((msg) => {
+          const isOwn = msg.sender_id === currentUserId;
+          return (
+            <div
+              key={msg.id}
+              className={`flex flex-col ${isOwn ? 'items-end' : 'items-start'}`}
+            >
+              {/* Sender + time */}
+              <div className={`flex items-center gap-1.5 mb-0.5 ${isOwn ? 'flex-row-reverse' : ''}`}>
+                <span className="text-xs font-medium text-foreground">
+                  {isOwn ? 'You' : msg.sender.full_name}
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  {new Date(msg.created_at).toLocaleTimeString('en-IN', {
+                    hour: '2-digit', minute: '2-digit',
+                  })}
+                </span>
+              </div>
+
+              {/* Bubble */}
+              <div
+                className={`max-w-[75%] rounded-2xl px-3.5 py-2 text-sm whitespace-pre-wrap break-words ${
+                  isOwn
+                    ? 'bg-primary text-primary-foreground rounded-tr-sm'
+                    : 'bg-muted text-foreground rounded-tl-sm'
+                }`}
+              >
+                {msg.body}
+              </div>
+            </div>
+          );
+        })}
+
         <div ref={bottomRef} />
       </div>
 
-      {/* Input row */}
-      <div className="flex gap-2 mt-3 flex-shrink-0">
-        <Textarea
-          value={content}
-          onChange={(e) => setContent(e.target.value)}
+      {/* Error */}
+      {error && (
+        <p className="text-xs text-red-600 px-1 pb-1">{error}</p>
+      )}
+
+      {/* Input */}
+      <form onSubmit={handleSubmit} className="flex gap-2 pt-3 border-t border-border">
+        <textarea
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Type a message… (Enter to send, Shift+Enter for newline)"
+          placeholder="Type a message… (Ctrl+Enter to send)"
           rows={2}
-          className="resize-none text-sm"
-          disabled={sending}
+          className="flex-1 resize-none rounded-lg border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground"
         />
-        <Button
-          size="sm"
-          onClick={handleSend}
-          disabled={!content.trim() || sending}
-          className="self-end min-h-[44px] min-w-[44px]"
-          aria-label="Send message"
+        <button
+          type="submit"
+          disabled={isPending || !body.trim()}
+          className="self-end rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors min-h-[40px]"
         >
-          <Send className="w-4 h-4" />
-        </Button>
-      </div>
+          Send
+        </button>
+      </form>
     </div>
   );
 }

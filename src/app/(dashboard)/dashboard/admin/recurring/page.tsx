@@ -1,28 +1,38 @@
-import { getTemplates } from '@/actions/recurring';
+import { redirect } from 'next/navigation';
+import { getCurrentUser } from '@/lib/auth/getUser';
+import { getRecurringTemplates } from '@/actions/recurring';
+import { getRoles } from '@/actions/roles';
+import { getClients } from '@/actions/clients';
 import { RecurringClient } from '@/components/recurring/RecurringClient';
 
-export const metadata = {
-  title: 'Recurring Templates | Filio',
-};
-
 export default async function RecurringPage() {
-  const result = await getTemplates();
+  const user = await getCurrentUser();
+  if (!user) redirect('/login');
 
-  // Graceful degradation — page still renders even if DB is unavailable
-  const templates = 'data' in result ? result.data : [];
+  const [templatesResult, rolesResult, clientsResult] = await Promise.all([
+    getRecurringTemplates(),
+    getRoles(),
+    getClients(),
+  ]);
+
+  if (templatesResult.error && templatesResult.error === 'Unauthorised') {
+    redirect('/dashboard');
+  }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <div>
-        <h1 className="text-xl sm:text-2xl font-bold">Recurring Templates</h1>
-        <p className="text-sm text-muted-foreground">
-          Templates auto-generate tasks on their cadence schedule.
+        <h1 className="text-2xl font-semibold">Recurring Tasks</h1>
+        <p className="text-sm text-muted-foreground mt-0.5">
+          Templates that auto-create tasks on a fixed schedule. Runs daily at 6:30 AM IST.
         </p>
-        {'error' in result && (
-          <p className="text-sm text-destructive mt-1">{result.error}</p>
-        )}
       </div>
-      <RecurringClient initialTemplates={templates} />
+
+      <RecurringClient
+        initialTemplates={templatesResult.data ?? []}
+        roles={rolesResult.data ?? []}
+        clients={clientsResult.data ?? []}
+      />
     </div>
   );
 }

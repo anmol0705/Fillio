@@ -2,127 +2,123 @@
 
 import { z } from 'zod';
 import { db } from '@/db';
-import { attendance_records, profiles, roles } from '@/db/schema';
-import { eq, and, gte, lt, sql, inArray } from 'drizzle-orm';
+import { attendance_records, profiles } from '@/db/schema';
+import { eq, and, gte, lt, inArray, sql } from 'drizzle-orm';
 import { getCurrentUser } from '@/lib/auth/getUser';
-import type { AttendanceRecord, Profile, Role } from '@/types';
+import type { AttendanceRecord, Profile } from '@/types';
 
 // ---------------------------------------------------------------------------
-// Attendance manager guard — requires is_org_admin OR can_mark_attendance
+// Permission guard
+//
+// Two kinds of users can mark attendance:
+//   1. Org admins (is_org_admin = true) — always allowed
+//   2. Users granted the specific permission (can_mark_attendance = true)
+//
+// This function is called at the top of every action that writes attendance.
+// If it returns { error }, the action immediately returns that error without
+// touching the database.
+//
+// Returning { orgId } means the caller is authorised — and gives us the
+// org_id we'll need for every query (so we don't have to fetch it again).
 // ---------------------------------------------------------------------------
 
-type AttendanceManagerContext = { orgId: string };
+type ManagerContext = { orgId: string };
 
-async function resolveAttendanceManager(): Promise<AttendanceManagerContext | { error: string }> {
+async function resolveAttendanceManager(): Promise<ManagerContext | { error: string }> {
+  // Step 1: confirm there is a logged-in user
   const user = await getCurrentUser();
-  if (!user) return { error: 'Unauthorized' } as const;
+  if (!user) return { error: 'Unauthorized' };
 
+  // Step 2: load their profile to check permissions
+  // We only select the columns we actually need — not SELECT *
   const profile = await db.query.profiles.findFirst({
     where: (p, { eq }) => eq(p.id, user.id),
     columns: { org_id: true, is_org_admin: true, can_mark_attendance: true },
   });
 
-  if (!profile) return { error: 'Profile not found' } as const;
+  if (!profile) return { error: 'Profile not found' };
+
+  // Step 3: check permission — either flag grants access
   if (!profile.is_org_admin && !profile.can_mark_attendance) {
-    return { error: 'Forbidden: attendance manager permission required' } as const;
+    return { error: 'Forbidden: attendance manager permission required' };
   }
 
-  return { orgId: profile.org_id } as const;
+  return { orgId: profile.org_id };
 }
 
-function isErr(r: unknown): r is { error: string } {
-  return typeof r === 'object' && r !== null && 'error' in r;
+// Small helper so we can write `if (isErr(ctx)) return ctx`
+// instead of `if ('error' in ctx) return ctx` everywhere.
+function isErr(v: unknown): v is { error: string } {
+  return typeof v === 'object' && v !== null && 'error' in v;
 }
 
 // ---------------------------------------------------------------------------
 // Zod schemas
+//
+// Zod validates data shape and content before it touches the DB.
+// .safeParse() returns { success: true, data } or { success: false, error }
+// — it never throws, so you always handle both cases explicitly.
 // ---------------------------------------------------------------------------
 
 const attendanceStatusSchema = z.enum(['present', 'absent', 'half_day', 'leave']);
 
-const dateStringSchema = z
+// Date must be a string in YYYY-MM-DD format — matches the Postgres `date` column
+const dateSchema = z
   .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be in YYYY-MM-DD format');
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be YYYY-MM-DD');
 
 const markAttendanceSchema = z.object({
   user_id: z.string().uuid('Invalid user_id'),
-  date: dateStringSchema,
-  status: attendanceStatusSchema,
-  note: z.string().max(500).optional(),
+  date:    dateSchema,
+  status:  attendanceStatusSchema,
+  note:    z.string().max(500).optional(),
 });
 
-const bulkMarkAttendanceSchema = z.object({
-  date: dateStringSchema,
+const bulkMarkSchema = z.object({
+  date:    dateSchema,
   records: z
-    .array(
-      z.object({
-        user_id: z.string().uuid('Invalid user_id'),
-        status: attendanceStatusSchema,
-      }),
-    )
-    .min(1, 'At least one record is required'),
+    .array(z.object({
+      user_id: z.string().uuid(),
+      status:  attendanceStatusSchema,
+    }))
+    .min(1, 'At least one record required'),
 });
-
-const monthlyQuerySchema = z.object({
-  year: z.number().int().min(2020).max(2100),
-  month: z.number().int().min(1).max(12),
-});
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-export type ProfileWithRole = Profile & { role: Role | null };
-
-export type AttendanceForDateRow = {
-  profile: ProfileWithRole;
-  record: AttendanceRecord | null;
-};
-
-export type MonthlySummaryRow = {
-  profile: ProfileWithRole;
-  present: number;
-  absent: number;
-  half_day: number;
-  leave: number;
-  total_days: number;
-};
 
 // ---------------------------------------------------------------------------
 // getAttendanceForDate
+//
+// Returns every active staff member in the org with their attendance record
+// for the given date (or null if not yet marked).
+//
+// This is a READ action — it uses the regular db client, not adminClient.
+// Only attendance managers can call it (they need to see everyone's status).
 // ---------------------------------------------------------------------------
 
-/**
- * Returns all active staff in the org with their attendance record for a
- * given date. Sorted by role sort_order ascending, then by full_name.
- * Requires org admin.
- */
-export async function getAttendanceForDate(
-  date: string,
-): Promise<{ data: AttendanceForDateRow[] } | { error: string }> {
+export type AttendanceRow = {
+  profile: Profile;
+  record:  AttendanceRecord | null;
+};
+
+export async function getAttendanceForDate( date: string,): Promise<{ data: AttendanceRow[] } | { error: string }> {
   const ctx = await resolveAttendanceManager();
   if (isErr(ctx)) return ctx;
 
-  const parsed = dateStringSchema.safeParse(date);
-  if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid date' };
+  const parsed = dateSchema.safeParse(date);
+  if (!parsed.success) return { error: 'Invalid date format' };
 
   try {
-    // Fetch all active profiles with their role in one query
-    const profileRows = await db.query.profiles.findMany({
-      where: (p, { eq, and }) =>
-        and(eq(p.org_id, ctx.orgId), eq(p.is_active, true)),
-      with: {
-        role: true,
-      },
-      orderBy: (p, { asc }) => [asc(p.full_name)],
-    });
+    // Fetch all active staff in this org
+    const staffList = await db
+      .select()
+      .from(profiles)
+      .where(and(eq(profiles.org_id, ctx.orgId), eq(profiles.is_active, true)));
 
-    if (profileRows.length === 0) return { data: [] };
+    if (staffList.length === 0) return { data: [] };
 
-    // Fetch all attendance records for these users on the given date
-    const userIds = profileRows.map((p) => p.id);
-
-    // Use a single query rather than N+1
+    // Fetch all attendance records for these users on this date in ONE query.
+    // This is the "batch query" pattern — instead of one query per person
+    // (N+1 problem), we fetch all records at once and join in JavaScript.
+    const userIds = staffList.map((p) => p.id);
     const records = await db
       .select()
       .from(attendance_records)
@@ -130,31 +126,19 @@ export async function getAttendanceForDate(
         and(
           eq(attendance_records.org_id, ctx.orgId),
           eq(attendance_records.date, parsed.data),
-          // Filter by users in this org — already covered by org_id check,
-          // but explicit user_id IN improves index usage.
           inArray(attendance_records.user_id, userIds),
         ),
       );
 
+    // Build a Map for O(1) lookup: user_id → record
     const recordByUserId = new Map<string, AttendanceRecord>();
     for (const r of records) {
       recordByUserId.set(r.user_id, r);
     }
 
-    // Sort by role sort_order then full_name
-    const sorted = [...profileRows].sort((a, b) => {
-      const aSortOrder = a.role?.sort_order ?? 9999;
-      const bSortOrder = b.role?.sort_order ?? 9999;
-      if (aSortOrder !== bSortOrder) return aSortOrder - bSortOrder;
-      return a.full_name.localeCompare(b.full_name);
-    });
-
-    const data: AttendanceForDateRow[] = sorted.map((p) => ({
-      profile: {
-        ...p,
-        role: p.role ?? null,
-      },
-      record: recordByUserId.get(p.id) ?? null,
+    const data: AttendanceRow[] = staffList.map((p) => ({
+      profile: p,
+      record:  recordByUserId.get(p.id) ?? null,
     }));
 
     return { data };
@@ -166,13 +150,19 @@ export async function getAttendanceForDate(
 
 // ---------------------------------------------------------------------------
 // markAttendance
+//
+// Upsert one attendance record for one person on one date.
+//
+// UPSERT explained:
+//   INSERT INTO attendance_records (org_id, user_id, date, status, note)
+//   VALUES (...)
+//   ON CONFLICT (user_id, date)       ← the unique constraint we defined
+//   DO UPDATE SET status = ..., note = ...
+//
+// This means: try to insert. If a row already exists for this (user, date)
+// pair, update it instead. One query, no race condition, no duplicate rows.
 // ---------------------------------------------------------------------------
 
-/**
- * Upsert a single attendance record for a staff member on a given date.
- * Uses the (user_id, date) unique constraint for conflict resolution.
- * Requires org admin.
- */
 export async function markAttendance(
   input: z.infer<typeof markAttendanceSchema>,
 ): Promise<{ data: AttendanceRecord } | { error: string }> {
@@ -184,38 +174,26 @@ export async function markAttendance(
 
   const { user_id, date, status, note } = parsed.data;
 
-  // Verify the target user belongs to the admin's org — never trust client input for org
+  // Security check: confirm the target user actually belongs to this org.
+  // Never trust user_id that came from the browser — someone could send any UUID.
   const targetProfile = await db.query.profiles.findFirst({
-    where: (p, { eq, and }) =>
+    where: (p, { and, eq }) =>
       and(eq(p.id, user_id), eq(p.org_id, ctx.orgId), eq(p.is_active, true)),
     columns: { id: true },
   });
-
-  if (!targetProfile) {
-    return { error: 'User not found or does not belong to your organisation' };
-  }
+  if (!targetProfile) return { error: 'User not found in your organisation' };
 
   try {
     const [record] = await db
       .insert(attendance_records)
-      .values({
-        org_id: ctx.orgId,
-        user_id,
-        date,
-        status,
-        note: note ?? null,
-      })
+      .values({ org_id: ctx.orgId, user_id, date, status, note: note ?? null })
       .onConflictDoUpdate({
         target: [attendance_records.user_id, attendance_records.date],
-        set: {
-          status,
-          note: note ?? null,
-        },
+        set:    { status, note: note ?? null },
       })
       .returning();
 
-    if (!record) return { error: 'Failed to save attendance record' };
-
+    if (!record) return { error: 'Failed to save record' };
     return { data: record };
   } catch (err) {
     console.error('[markAttendance]', err);
@@ -225,29 +203,28 @@ export async function markAttendance(
 
 // ---------------------------------------------------------------------------
 // bulkMarkAttendance
+//
+// Upsert attendance for the entire team for one date in a single DB call.
+// The UI sends one big array — we validate all user_ids belong to this org,
+// then insert them all at once. One round-trip to the DB for any team size.
 // ---------------------------------------------------------------------------
 
-/**
- * Upsert attendance for multiple staff on a single date.
- * All user_ids must belong to the admin's org.
- * Returns the count of records upserted.
- * Requires org admin.
- */
 export async function bulkMarkAttendance(
-  input: z.infer<typeof bulkMarkAttendanceSchema>,
+  input: z.infer<typeof bulkMarkSchema>,
 ): Promise<{ data: number } | { error: string }> {
   const ctx = await resolveAttendanceManager();
   if (isErr(ctx)) return ctx;
 
-  const parsed = bulkMarkAttendanceSchema.safeParse(input);
+  const parsed = bulkMarkSchema.safeParse(input);
   if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid input' };
 
   const { date, records: inputRecords } = parsed.data;
 
-  // Verify all user_ids belong to this org in a single query
+  // Deduplicate user_ids (browser might send duplicates)
   const userIds = [...new Set(inputRecords.map((r) => r.user_id))];
 
-  const orgProfiles = await db
+  // Verify ALL user_ids belong to this org in a single query
+  const validProfiles = await db
     .select({ id: profiles.id })
     .from(profiles)
     .where(
@@ -258,36 +235,32 @@ export async function bulkMarkAttendance(
       ),
     );
 
-  const validUserIds = new Set(orgProfiles.map((p) => p.id));
-  const invalidIds = userIds.filter((id) => !validUserIds.has(id));
+  const validIds = new Set(validProfiles.map((p) => p.id));
+  const invalidIds = userIds.filter((id) => !validIds.has(id));
 
   if (invalidIds.length > 0) {
-    return {
-      error: `The following user IDs do not belong to your organisation: ${invalidIds.join(', ')}`,
-    };
+    return { error: `Unknown user IDs: ${invalidIds.join(', ')}` };
   }
 
   try {
-    const valuesToInsert = inputRecords.map((r) => ({
-      org_id: ctx.orgId,
+    const rows = inputRecords.map((r) => ({
+      org_id:  ctx.orgId,
       user_id: r.user_id,
       date,
-      status: r.status,
-      note: null as string | null,
+      status:  r.status,
+      note:    null as string | null,
     }));
 
     await db
       .insert(attendance_records)
-      .values(valuesToInsert)
+      .values(rows)
       .onConflictDoUpdate({
         target: [attendance_records.user_id, attendance_records.date],
-        set: {
-          status: sql`excluded.status`,
-          note: sql`excluded.note`,
-        },
+        // sql`excluded.status` means "use the value we just tried to insert"
+        set:    { status: sql`excluded.status`, note: sql`excluded.note` },
       });
 
-    return { data: valuesToInsert.length };
+    return { data: rows.length };
   } catch (err) {
     console.error('[bulkMarkAttendance]', err);
     return { error: 'Failed to bulk mark attendance' };
@@ -296,14 +269,21 @@ export async function bulkMarkAttendance(
 
 // ---------------------------------------------------------------------------
 // getMonthlyAttendanceSummary
+//
+// Returns per-person counts (present / absent / half_day / leave) for a
+// given month. Fetches all records for the month in ONE query, then
+// aggregates in JavaScript — faster than GROUP BY for small teams.
 // ---------------------------------------------------------------------------
 
-/**
- * Returns per-staff attendance counts for a given month/year.
- * Only active profiles are included. Staff with zero records still appear
- * with all counts at 0.
- * Requires org admin.
- */
+export type MonthlySummaryRow = {
+  profile:    Profile;
+  present:    number;
+  absent:     number;
+  half_day:   number;
+  leave:      number;
+  total_days: number;
+};
+
 export async function getMonthlyAttendanceSummary(
   year: number,
   month: number,
@@ -311,101 +291,129 @@ export async function getMonthlyAttendanceSummary(
   const ctx = await resolveAttendanceManager();
   if (isErr(ctx)) return ctx;
 
-  const parsed = monthlyQuerySchema.safeParse({ year, month });
-  if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid year/month' };
+  const parsed = z.object({
+    year:  z.number().int().min(2020).max(2100),
+    month: z.number().int().min(1).max(12),
+  }).safeParse({ year, month });
+  if (!parsed.success) return { error: 'Invalid year or month' };
 
-  // Build date range for the month — 'YYYY-MM-DD' strings
-  const monthStr = String(parsed.data.month).padStart(2, '0');
-  const startDate = `${parsed.data.year}-${monthStr}-01`;
+  // Build the date range as YYYY-MM-DD strings
+  const mm        = String(parsed.data.month).padStart(2, '0');
+  const startDate = `${parsed.data.year}-${mm}-01`;
 
-  // Last day of the month: first day of next month minus 1
   const nextMonth = parsed.data.month === 12 ? 1 : parsed.data.month + 1;
-  const nextYear = parsed.data.month === 12 ? parsed.data.year + 1 : parsed.data.year;
-  const nextMonthStr = String(nextMonth).padStart(2, '0');
-  const endDateExclusive = `${nextYear}-${nextMonthStr}-01`;
+  const nextYear  = parsed.data.month === 12 ? parsed.data.year + 1 : parsed.data.year;
+  const endDate   = `${nextYear}-${String(nextMonth).padStart(2, '0')}-01`;
 
   try {
-    // Fetch all active profiles with role
-    const profileRows = await db.query.profiles.findMany({
-      where: (p, { eq, and }) =>
-        and(eq(p.org_id, ctx.orgId), eq(p.is_active, true)),
-      with: { role: true },
-      orderBy: (p, { asc }) => [asc(p.full_name)],
-    });
+    const staffList = await db
+      .select()
+      .from(profiles)
+      .where(and(eq(profiles.org_id, ctx.orgId), eq(profiles.is_active, true)));
 
-    if (profileRows.length === 0) return { data: [] };
+    if (staffList.length === 0) return { data: [] };
 
-    // Fetch all attendance records for this org in the given month
+    // One query for all records in the month — not one per person
     const monthRecords = await db
-      .select({
-        user_id: attendance_records.user_id,
-        status: attendance_records.status,
-      })
+      .select({ user_id: attendance_records.user_id, status: attendance_records.status })
       .from(attendance_records)
       .where(
         and(
           eq(attendance_records.org_id, ctx.orgId),
           gte(attendance_records.date, startDate),
-          lt(attendance_records.date, endDateExclusive),
+          lt(attendance_records.date, endDate),
         ),
       );
 
-    // Aggregate counts per user_id
-    type StatusCounts = {
-      present: number;
-      absent: number;
-      half_day: number;
-      leave: number;
-      total_days: number;
-    };
-
-    const countsByUser = new Map<string, StatusCounts>();
+    // Aggregate in JavaScript
+    type Counts = { present: number; absent: number; half_day: number; leave: number; total_days: number };
+    const countsByUser = new Map<string, Counts>();
 
     for (const row of monthRecords) {
-      const existing = countsByUser.get(row.user_id) ?? {
-        present: 0,
-        absent: 0,
-        half_day: 0,
-        leave: 0,
-        total_days: 0,
-      };
-
-      existing.total_days += 1;
-
-      if (row.status === 'present') existing.present += 1;
-      else if (row.status === 'absent') existing.absent += 1;
-      else if (row.status === 'half_day') existing.half_day += 1;
-      else if (row.status === 'leave') existing.leave += 1;
-
-      countsByUser.set(row.user_id, existing);
+      const c = countsByUser.get(row.user_id) ?? { present: 0, absent: 0, half_day: 0, leave: 0, total_days: 0 };
+      c.total_days += 1;
+      if (row.status === 'present')  c.present  += 1;
+      if (row.status === 'absent')   c.absent   += 1;
+      if (row.status === 'half_day') c.half_day += 1;
+      if (row.status === 'leave')    c.leave    += 1;
+      countsByUser.set(row.user_id, c);
     }
 
-    // Sort by role sort_order then full_name
-    const sorted = [...profileRows].sort((a, b) => {
-      const aSortOrder = a.role?.sort_order ?? 9999;
-      const bSortOrder = b.role?.sort_order ?? 9999;
-      if (aSortOrder !== bSortOrder) return aSortOrder - bSortOrder;
-      return a.full_name.localeCompare(b.full_name);
-    });
+    const zero: Counts = { present: 0, absent: 0, half_day: 0, leave: 0, total_days: 0 };
 
-    const data: MonthlySummaryRow[] = sorted.map((p) => {
-      const counts = countsByUser.get(p.id) ?? {
-        present: 0,
-        absent: 0,
-        half_day: 0,
-        leave: 0,
-        total_days: 0,
-      };
-
-      return {
-        profile: { ...p, role: p.role ?? null },
-        ...counts,
-      };
-    });
+    const data: MonthlySummaryRow[] = staffList.map((p) => ({
+      profile: p,
+      ...(countsByUser.get(p.id) ?? zero),
+    }));
 
     return { data };
   } catch (err) {
     console.error('[getMonthlyAttendanceSummary]', err);
-    return { error: 'Failed to fetch monthly attendance summary' };
+    return { error: 'Failed to fetch monthly summary' };
   }
+}
+
+// ---------------------------------------------------------------------------
+// getMyAttendance — any authenticated user can view their own records
+// ---------------------------------------------------------------------------
+
+export type MyAttendanceRecord = {
+  date:   string;              // 'YYYY-MM-DD'
+  status: 'present' | 'absent' | 'half_day' | 'leave';
+  note:   string | null;
+};
+
+export type MyAttendanceSummary = {
+  records:    MyAttendanceRecord[];
+  present:    number;
+  absent:     number;
+  half_day:   number;
+  leave:      number;
+  total_days: number;
+};
+
+export async function getMyAttendance(
+  year: number,
+  month: number,
+): Promise<{ data: MyAttendanceSummary } | { error: string }> {
+  const user = await getCurrentUser();
+  if (!user) return { error: 'Unauthorized' };
+
+  const parsed = z.object({
+    year:  z.number().int().min(2020).max(2100),
+    month: z.number().int().min(1).max(12),
+  }).safeParse({ year, month });
+  if (!parsed.success) return { error: 'Invalid year or month' };
+
+  const mm        = String(parsed.data.month).padStart(2, '0');
+  const startDate = `${parsed.data.year}-${mm}-01`;
+  const nextMonth = parsed.data.month === 12 ? 1 : parsed.data.month + 1;
+  const nextYear  = parsed.data.month === 12 ? parsed.data.year + 1 : parsed.data.year;
+  const endDate   = `${nextYear}-${String(nextMonth).padStart(2, '0')}-01`;
+
+  const rows = await db
+    .select({
+      date:   attendance_records.date,
+      status: attendance_records.status,
+      note:   attendance_records.note,
+    })
+    .from(attendance_records)
+    .where(
+      and(
+        eq(attendance_records.user_id, user.id),
+        gte(attendance_records.date, startDate),
+        lt(attendance_records.date, endDate),
+      ),
+    )
+    .orderBy(attendance_records.date);
+
+  const summary = { present: 0, absent: 0, half_day: 0, leave: 0, total_days: rows.length };
+  for (const r of rows) {
+    if (r.status === 'present')  summary.present  += 1;
+    if (r.status === 'absent')   summary.absent   += 1;
+    if (r.status === 'half_day') summary.half_day += 1;
+    if (r.status === 'leave')    summary.leave    += 1;
+  }
+
+  return { data: { records: rows, ...summary } };
 }

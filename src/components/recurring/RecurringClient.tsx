@@ -1,15 +1,9 @@
 'use client';
 
-import { useState } from 'react';
-import { useForm } from 'react-hook-form';
-import type { Resolver } from 'react-hook-form';
-import { zodResolver } from '@hookform/resolvers/zod';
-import { z } from 'zod';
-import { toast } from 'sonner';
+import { useState, useTransition } from 'react';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
+import { Switch } from '@/components/ui/switch';
 import {
   Dialog,
   DialogContent,
@@ -24,302 +18,343 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { createTemplate, deleteTemplate } from '@/actions/recurring';
-import { Plus, Trash2, RefreshCw } from 'lucide-react';
-import type { RecurringTemplate } from '@/types';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import {
+  createRecurringTemplate,
+  updateRecurringTemplate,
+  toggleTemplateActive,
+  deleteRecurringTemplate,
+} from '@/actions/recurring';
+import type { RecurringTemplate, Role, Client } from '@/types';
+
+// ---------------------------------------------------------------------------
+// Props
+// ---------------------------------------------------------------------------
+
+interface Props {
+  initialTemplates: RecurringTemplate[];
+  roles:            Role[];
+  clients:          Client[];
+}
+
+// ---------------------------------------------------------------------------
+// Form state
+// ---------------------------------------------------------------------------
+
+type FormValues = {
+  title:                    string;
+  task_type:                RecurringTemplate['task_type'];
+  cadence:                  RecurringTemplate['cadence'];
+  priority:                 RecurringTemplate['priority'];
+  default_assignee_role_id: string;
+  default_client_id:        string;
+  due_in_days:              string;
+};
+
+const EMPTY_FORM: FormValues = {
+  title:                    '',
+  task_type:                'gst',
+  cadence:                  'monthly',
+  priority:                 'medium',
+  default_assignee_role_id: '',
+  default_client_id:        '',
+  due_in_days:              '30',
+};
 
 // ---------------------------------------------------------------------------
 // Display maps
 // ---------------------------------------------------------------------------
 
-const CADENCE_LABELS: Record<string, string> = {
-  monthly: 'Monthly',
-  quarterly: 'Quarterly',
-  half_yearly: 'Half-Yearly',
-  annually: 'Annually',
+const CADENCE_LABELS: Record<RecurringTemplate['cadence'], string> = {
+  monthly:     'Monthly (1st of every month)',
+  quarterly:   'Quarterly (Jan, Apr, Jul, Oct)',
+  half_yearly: 'Half-yearly (Apr, Oct)',
+  annually:    'Annually (1st April)',
 };
 
-const TYPE_LABELS: Record<string, string> = {
-  gst: 'GST',
-  tds: 'TDS',
+const CADENCE_SHORT: Record<RecurringTemplate['cadence'], string> = {
+  monthly:     'Monthly',
+  quarterly:   'Quarterly',
+  half_yearly: 'Half-yearly',
+  annually:    'Annually',
+};
+
+const TYPE_LABELS: Record<RecurringTemplate['task_type'], string> = {
+  gst:        'GST',
+  tds:        'TDS',
   income_tax: 'Income Tax',
-  audit: 'Audit',
-  roc_mca: 'ROC/MCA',
+  audit:      'Audit',
+  roc_mca:    'ROC / MCA',
   accounting: 'Accounting',
-  payroll: 'Payroll',
-  notice: 'Notice',
-  advisory: 'Advisory',
-  other: 'Other',
+  payroll:    'Payroll',
+  notice:     'Notice',
+  advisory:   'Advisory',
+  other:      'Other',
 };
 
-const PRIORITY_LABELS: Record<string, string> = {
-  urgent: 'Urgent',
-  high: 'High',
-  medium: 'Medium',
-  low: 'Low',
-};
-
-// ---------------------------------------------------------------------------
-// Form schema (client-side, mirrors server schema)
-// z.coerce.number() in Zod v4 infers output as `unknown` — FormData is typed
-// explicitly below and the resolver is cast to avoid the inference gap.
-// ---------------------------------------------------------------------------
-
-const formSchema = z.object({
-  title: z.string().min(1, 'Title is required').max(500),
-  task_type: z.enum([
-    'gst',
-    'tds',
-    'income_tax',
-    'audit',
-    'roc_mca',
-    'accounting',
-    'payroll',
-    'notice',
-    'advisory',
-    'other',
-  ]),
-  cadence: z.enum(['monthly', 'quarterly', 'half_yearly', 'annually']),
-  default_priority: z.enum(['urgent', 'high', 'medium', 'low']),
-  // z.coerce handles HTML input strings; FormData declares the output as number
-  days_before_due: z.coerce.number().int().min(1).max(365),
-});
-
-// Explicit type — z.infer<typeof formSchema> would yield `unknown` for
-// days_before_due due to a Zod v4 coerce inference limitation.
-type FormData = {
-  title: string;
-  task_type:
-    | 'gst'
-    | 'tds'
-    | 'income_tax'
-    | 'audit'
-    | 'roc_mca'
-    | 'accounting'
-    | 'payroll'
-    | 'notice'
-    | 'advisory'
-    | 'other';
-  cadence: 'monthly' | 'quarterly' | 'half_yearly' | 'annually';
-  default_priority: 'urgent' | 'high' | 'medium' | 'low';
-  days_before_due: number;
+const PRIORITY_COLOURS: Record<RecurringTemplate['priority'], string> = {
+  urgent: 'bg-red-100 text-red-700',
+  high:   'bg-orange-100 text-orange-700',
+  medium: 'bg-yellow-100 text-yellow-700',
+  low:    'bg-slate-100 text-slate-600',
 };
 
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
-interface Props {
-  initialTemplates: RecurringTemplate[];
-}
+export function RecurringClient({ initialTemplates, roles, clients }: Props) {
+  const [templates, setTemplates]         = useState<RecurringTemplate[]>(initialTemplates);
+  const [open, setOpen]                   = useState(false);
+  const [editing, setEditing]             = useState<RecurringTemplate | null>(null);
+  const [form, setForm]                   = useState<FormValues>(EMPTY_FORM);
+  const [formError, setFormError]         = useState('');
+  const [isPending, startTransition]      = useTransition();
 
-export function RecurringClient({ initialTemplates }: Props) {
-  const [templates, setTemplates] = useState<RecurringTemplate[]>(initialTemplates);
-  const [open, setOpen] = useState(false);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
+  // ── helpers ──────────────────────────────────────────────────────────────
 
-  const {
-    register,
-    handleSubmit,
-    setValue,
-    reset,
-    formState: { errors, isSubmitting },
-    // Cast required: zodResolver returns Resolver typed with the schema's
-    // inferred output (days_before_due: unknown due to Zod v4 coerce), but
-    // FormData declares it as number. Runtime behavior is correct.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  } = useForm<FormData>({ resolver: zodResolver(formSchema) as Resolver<FormData, any>, defaultValues: { default_priority: 'medium', days_before_due: 7 } });
-
-  function handleClose() {
-    reset();
-    setOpen(false);
+  function setField<K extends keyof FormValues>(key: K, value: FormValues[K]) {
+    setForm((prev) => ({ ...prev, [key]: value }));
   }
 
-  async function onSubmit(data: FormData) {
-    const result = await createTemplate(data);
+  function openCreate() {
+    setEditing(null);
+    setForm(EMPTY_FORM);
+    setFormError('');
+    setOpen(true);
+  }
 
-    if ('error' in result) {
-      toast.error(result.error);
+  function openEdit(t: RecurringTemplate) {
+    setEditing(t);
+    setForm({
+      title:                    t.title,
+      task_type:                t.task_type,
+      cadence:                  t.cadence,
+      priority:                 t.priority,
+      default_assignee_role_id: t.default_assignee_role_id ?? '',
+      default_client_id:        t.default_client_id ?? '',
+      due_in_days:              String(t.due_in_days),
+    });
+    setFormError('');
+    setOpen(true);
+  }
+
+  // ── submit ───────────────────────────────────────────────────────────────
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setFormError('');
+
+    const dueDays = parseInt(form.due_in_days, 10);
+    if (isNaN(dueDays) || dueDays < 1 || dueDays > 365) {
+      setFormError('Due in days must be between 1 and 365.');
+      return;
+    }
+    if (!form.title.trim()) {
+      setFormError('Title is required.');
       return;
     }
 
-    setTemplates((prev) => [...prev, result.data]);
-    toast.success('Template created');
-    handleClose();
+    const payload = {
+      title:                    form.title.trim(),
+      task_type:                form.task_type,
+      cadence:                  form.cadence,
+      priority:                 form.priority,
+      default_assignee_role_id: form.default_assignee_role_id || null,
+      default_client_id:        form.default_client_id || null,
+      due_in_days:              dueDays,
+    };
+
+    startTransition(async () => {
+      if (editing) {
+        const res = await updateRecurringTemplate(editing.id, payload);
+        if (res.error !== null) { setFormError(res.error); return; }
+        setTemplates((prev) => prev.map((t) => t.id === editing.id ? res.data : t));
+      } else {
+        const res = await createRecurringTemplate(payload);
+        if (res.error !== null) { setFormError(res.error); return; }
+        setTemplates((prev) => [res.data, ...prev]);
+      }
+      setOpen(false);
+    });
   }
 
-  async function handleDelete(id: string) {
-    if (!confirm('Delete this template? No future tasks will be generated from it.')) {
-      return;
-    }
+  // ── toggle active ────────────────────────────────────────────────────────
 
-    setDeletingId(id);
-    const result = await deleteTemplate(id);
-    setDeletingId(null);
-
-    if ('error' in result) {
-      toast.error(result.error);
-      return;
-    }
-
-    setTemplates((prev) => prev.filter((t) => t.id !== id));
-    toast.success('Template deleted');
+  function handleToggle(t: RecurringTemplate) {
+    const next = !t.is_active;
+    setTemplates((prev) => prev.map((r) => r.id === t.id ? { ...r, is_active: next } : r));
+    startTransition(async () => {
+      const res = await toggleTemplateActive(t.id, next);
+      if (res.error) {
+        setTemplates((prev) => prev.map((r) => r.id === t.id ? { ...r, is_active: t.is_active } : r));
+      }
+    });
   }
+
+  // ── delete ───────────────────────────────────────────────────────────────
+
+  function handleDelete(t: RecurringTemplate) {
+    if (!confirm(`Delete template "${t.title}"?\n\nNo future tasks will be created from it.`)) return;
+    setTemplates((prev) => prev.filter((r) => r.id !== t.id));
+    startTransition(async () => {
+      const res = await deleteRecurringTemplate(t.id);
+      if (res.error) {
+        setTemplates((prev) => [t, ...prev]);
+      }
+    });
+  }
+
+  // ── render ───────────────────────────────────────────────────────────────
 
   return (
-    <div className="space-y-4">
-      {/* Toolbar */}
-      <div className="flex justify-end">
-        <Button size="sm" onClick={() => setOpen(true)} className="min-h-[44px]">
-          <Plus className="w-4 h-4 mr-1.5" />
-          New Template
+    <>
+      {/* Header row */}
+      <div className="flex items-center justify-between">
+        <p className="text-sm text-muted-foreground">
+          {templates.length} template{templates.length !== 1 ? 's' : ''}
+        </p>
+        <Button size="sm" onClick={openCreate}>
+          + New template
         </Button>
       </div>
 
-      {/* Template list */}
+      {/* Empty state */}
       {templates.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-muted-foreground border rounded-lg">
-          <RefreshCw className="w-8 h-8 mb-2 opacity-30" />
-          <p className="text-sm">No recurring templates yet</p>
-          <p className="text-xs mt-1">
-            Create one to auto-generate tasks on a schedule.
+        <div className="rounded-lg border border-dashed px-6 py-12 text-center">
+          <p className="text-sm font-medium">No recurring templates yet</p>
+          <p className="text-xs text-muted-foreground mt-1">
+            Create a template and tasks will be spawned automatically on schedule.
           </p>
         </div>
       ) : (
-        <div className="space-y-2">
-          {templates.map((t) => (
-            <div
-              key={t.id}
-              className="rounded-lg border bg-card px-4 py-3 space-y-2"
-            >
-              <div className="flex items-start gap-3">
+        <div className="divide-y rounded-lg border overflow-hidden">
+          {templates.map((t) => {
+            const roleName   = roles.find((r) => r.id === t.default_assignee_role_id)?.name;
+            const clientName = clients.find((c) => c.id === t.default_client_id)?.name;
+
+            return (
+              <div key={t.id} className="flex items-center gap-4 px-4 py-3">
+                <Switch
+                  checked={t.is_active}
+                  onCheckedChange={() => handleToggle(t)}
+                  aria-label="Toggle active"
+                />
+
                 <div className="flex-1 min-w-0">
-                  <p className="font-medium truncate">{t.title}</p>
-                  <div className="flex items-center gap-2 mt-1 flex-wrap">
-                    <span className="text-xs text-muted-foreground">
-                      {TYPE_LABELS[t.task_type] ?? t.task_type}
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className={`text-sm font-medium truncate ${!t.is_active ? 'opacity-50' : ''}`}>
+                      {t.title}
                     </span>
-                    <span className="text-xs text-muted-foreground">&middot;</span>
-                    <span className="text-xs text-muted-foreground">
-                      {PRIORITY_LABELS[t.default_priority] ?? t.default_priority}
-                    </span>
-                    <span className="text-xs text-muted-foreground">&middot;</span>
-                    <span className="text-xs text-muted-foreground">
-                      {t.days_before_due}d before due
+                    <Badge variant="outline" className="text-xs shrink-0">
+                      {TYPE_LABELS[t.task_type]}
+                    </Badge>
+                    <span
+                      className={`text-xs px-2 py-0.5 rounded-full font-medium shrink-0 ${PRIORITY_COLOURS[t.priority]}`}
+                    >
+                      {t.priority}
                     </span>
                   </div>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    {CADENCE_SHORT[t.cadence]}
+                    {' · '}due in {t.due_in_days}d
+                    {roleName   ? ` · ${roleName}`   : ' · open pool'}
+                    {clientName ? ` · ${clientName}` : ''}
+                  </p>
                 </div>
+
                 <div className="flex items-center gap-2 shrink-0">
-                  <Badge variant="secondary">
-                    {CADENCE_LABELS[t.cadence] ?? t.cadence}
-                  </Badge>
-                  <button
-                    type="button"
-                    aria-label="Delete template"
-                    disabled={deletingId === t.id}
-                    onClick={() => handleDelete(t.id)}
-                    className="p-2 rounded-md hover:bg-destructive/10 text-muted-foreground hover:text-destructive disabled:opacity-50 disabled:cursor-not-allowed transition-colors min-h-[44px] min-w-[44px] flex items-center justify-center"
+                  <Button variant="outline" size="sm" onClick={() => openEdit(t)}>
+                    Edit
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                    onClick={() => handleDelete(t)}
                   >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                    Delete
+                  </Button>
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
-      {/* Create dialog */}
-      <Dialog open={open} onOpenChange={(isOpen) => { if (!isOpen) handleClose(); }}>
-        <DialogContent className="sm:max-w-md">
+      {/* Create / Edit dialog */}
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>New Recurring Template</DialogTitle>
+            <DialogTitle>
+              {editing ? 'Edit template' : 'New recurring template'}
+            </DialogTitle>
           </DialogHeader>
 
-          <form onSubmit={handleSubmit(onSubmit)} className="space-y-4 pt-1">
+          <form onSubmit={handleSubmit} className="space-y-4 pt-2">
             {/* Title */}
             <div className="space-y-1.5">
-              <Label htmlFor="rt-title">Template Title *</Label>
+              <Label htmlFor="rt-title">Title</Label>
               <Input
                 id="rt-title"
-                {...register('title')}
-                placeholder="e.g. GSTR-1 Monthly Filing"
+                value={form.title}
+                onChange={(e) => setField('title', e.target.value)}
+                placeholder="e.g. Monthly GSTR-1 Filing"
+                required
               />
-              {errors.title && (
-                <p className="text-xs text-destructive">{errors.title.message}</p>
-              )}
             </div>
 
-            {/* Task type + Cadence — stack on mobile */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {/* Task type + Cadence */}
+            <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1.5">
-                <Label>Task Type *</Label>
+                <Label>Task type</Label>
                 <Select
-                  onValueChange={(v) =>
-                    setValue('task_type', v as FormData['task_type'], {
-                      shouldValidate: true,
-                    })
-                  }
+                  value={form.task_type}
+                  onValueChange={(v) => setField('task_type', v as RecurringTemplate['task_type'])}
                 >
-                  <SelectTrigger className="w-full">
-                    <SelectValue placeholder="Select" />
+                  <SelectTrigger>
+                    <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {Object.entries(TYPE_LABELS).map(([v, l]) => (
-                      <SelectItem key={v} value={v}>
-                        {l}
-                      </SelectItem>
-                    ))}
+                    {(Object.entries(TYPE_LABELS) as [RecurringTemplate['task_type'], string][]).map(
+                      ([value, label]) => (
+                        <SelectItem key={value} value={value}>{label}</SelectItem>
+                      ),
+                    )}
                   </SelectContent>
                 </Select>
-                {errors.task_type && (
-                  <p className="text-xs text-destructive">
-                    {errors.task_type.message}
-                  </p>
-                )}
               </div>
 
               <div className="space-y-1.5">
-                <Label>Cadence *</Label>
+                <Label>Cadence</Label>
                 <Select
-                  onValueChange={(v) =>
-                    setValue('cadence', v as FormData['cadence'], {
-                      shouldValidate: true,
-                    })
-                  }
+                  value={form.cadence}
+                  onValueChange={(v) => setField('cadence', v as RecurringTemplate['cadence'])}
                 >
-                  <SelectTrigger className="w-full">
-                    <SelectValue placeholder="Select" />
+                  <SelectTrigger>
+                    <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {Object.entries(CADENCE_LABELS).map(([v, l]) => (
-                      <SelectItem key={v} value={v}>
-                        {l}
-                      </SelectItem>
-                    ))}
+                    {(Object.entries(CADENCE_LABELS) as [RecurringTemplate['cadence'], string][]).map(
+                      ([value, label]) => (
+                        <SelectItem key={value} value={value}>{label}</SelectItem>
+                      ),
+                    )}
                   </SelectContent>
                 </Select>
-                {errors.cadence && (
-                  <p className="text-xs text-destructive">
-                    {errors.cadence.message}
-                  </p>
-                )}
               </div>
             </div>
 
-            {/* Priority + Days before due — stack on mobile */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {/* Priority + Due in days */}
+            <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1.5">
                 <Label>Priority</Label>
                 <Select
-                  defaultValue="medium"
-                  onValueChange={(v) =>
-                    setValue('default_priority', v as FormData['default_priority'], {
-                      shouldValidate: true,
-                    })
-                  }
+                  value={form.priority}
+                  onValueChange={(v) => setField('priority', v as RecurringTemplate['priority'])}
                 >
-                  <SelectTrigger className="w-full">
+                  <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -332,38 +367,78 @@ export function RecurringClient({ initialTemplates }: Props) {
               </div>
 
               <div className="space-y-1.5">
-                <Label htmlFor="rt-days">Days Before Due</Label>
+                <Label htmlFor="rt-due">Due in days</Label>
                 <Input
-                  id="rt-days"
+                  id="rt-due"
                   type="number"
                   min={1}
                   max={365}
-                  {...register('days_before_due')}
+                  value={form.due_in_days}
+                  onChange={(e) => setField('due_in_days', e.target.value)}
+                  required
                 />
-                {errors.days_before_due && (
-                  <p className="text-xs text-destructive">
-                    {errors.days_before_due.message}
-                  </p>
-                )}
+                <p className="text-xs text-muted-foreground">
+                  Days from task creation date
+                </p>
               </div>
             </div>
 
-            <DialogFooter className="flex-col-reverse sm:flex-row gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={handleClose}
-                className="min-h-[44px] w-full sm:w-auto"
+            {/* Default assignee role */}
+            <div className="space-y-1.5">
+              <Label>Default assignee role</Label>
+              <Select
+                value={form.default_assignee_role_id || '_none'}
+                onValueChange={(v) => setField('default_assignee_role_id', v == null || v === '_none' ? '' : v)}
               >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="_none">Open pool (no specific role)</SelectItem>
+                  {roles.map((r) => (
+                    <SelectItem key={r.id} value={r.id}>{r.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Cron picks the first active user with this role. If none, task is open pool.
+              </p>
+            </div>
+
+            {/* Default client */}
+            <div className="space-y-1.5">
+              <Label>Default client</Label>
+              <Select
+                value={form.default_client_id || '_none'}
+                onValueChange={(v) => setField('default_client_id', v == null || v === '_none' ? '' : v)}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="_none">No specific client</SelectItem>
+                  {clients.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {formError && (
+              <p className="text-sm text-red-600">{formError}</p>
+            )}
+
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setOpen(false)}>
                 Cancel
               </Button>
-              <Button type="submit" disabled={isSubmitting} className="min-h-[44px] w-full sm:w-auto">
-                {isSubmitting ? 'Saving...' : 'Create Template'}
+              <Button type="submit" disabled={isPending}>
+                {isPending ? 'Saving…' : editing ? 'Save changes' : 'Create template'}
               </Button>
             </DialogFooter>
           </form>
         </DialogContent>
       </Dialog>
-    </div>
+    </>
   );
 }

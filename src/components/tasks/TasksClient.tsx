@@ -2,34 +2,46 @@
 
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
-import { Plus } from 'lucide-react';
-import { TaskTable } from './TaskTable';
 import { TaskForm } from './TaskForm';
-import type { TaskWithRelations, Client, Profile } from '@/types';
+import { TasksTable } from './TasksTable';
+import type { TaskListItem, Client, Profile } from '@/types';
 
 interface Props {
-  tasks: TaskWithRelations[];
-  clients: Client[];
-  users: Profile[];
+  initialTasks: TaskListItem[];
+  clients:      Client[];
+  members:      Pick<Profile, 'id' | 'full_name'>[];
 }
 
-export function TasksClient({ tasks, clients, users }: Props) {
-  const [createOpen, setCreateOpen] = useState(false);
+export function TasksClient({ initialTasks, clients, members }: Props) {
+  const [open,  setOpen]  = useState(false);
+  const [tasks, setTasks] = useState<TaskListItem[]>(initialTasks);
+
+  function addTask(task: TaskListItem) {
+    setTasks((prev) => [task, ...prev]);
+  }
+
+  function removeTask(id: string) {
+    setTasks((prev) => prev.filter((t) => t.id !== id));
+  }
 
   return (
-    <div className="space-y-3">
-      <div className="flex justify-end">
-        <Button size="sm" onClick={() => setCreateOpen(true)} className="min-h-[44px]">
-          <Plus className="w-4 h-4 mr-1.5" />
-          New Task
-        </Button>
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold">My Tasks</h1>
+          <p className="text-sm text-muted-foreground mt-0.5">Tasks you created or have access to.</p>
+        </div>
+        <Button onClick={() => setOpen(true)}>New Task</Button>
       </div>
-      <TaskTable data={tasks} />
+
+      <TasksTable tasks={tasks} onRemove={removeTask} />
+
       <TaskForm
-        open={createOpen}
-        onClose={() => setCreateOpen(false)}
+        open={open}
+        onOpenChange={setOpen}
         clients={clients}
-        users={users}
+        members={members}
+        onCreated={addTask}
       />
     </div>
   );

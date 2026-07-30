@@ -13,6 +13,7 @@ import {
   Inbox,
   CalendarCheck,
   ClipboardList,
+  ShieldCheck,
   X,
 } from 'lucide-react';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -26,18 +27,20 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-  { label: 'My Tasks', href: '/dashboard/tasks', icon: CheckSquare },
-  { label: 'Open Pool', href: '/dashboard/tasks/pool', icon: Inbox },
-  { label: 'Clients', href: '/dashboard/clients', icon: Building2 },
-  { label: 'Compliance', href: '/dashboard/compliance', icon: CalendarCheck },
+  { label: 'Dashboard',     href: '/dashboard',             icon: LayoutDashboard },
+  { label: 'My Tasks',      href: '/dashboard/tasks',       icon: CheckSquare },
+  { label: 'Open Pool',     href: '/dashboard/tasks/pool',  icon: Inbox },
+  { label: 'Clients',       href: '/dashboard/clients',     icon: Building2 },
+  { label: 'Calendar',      href: '/dashboard/compliance',  icon: CalendarCheck },
+  { label: 'My Attendance', href: '/dashboard/attendance',  icon: ClipboardList },
 ];
 
 const ADMIN_ITEMS: NavItem[] = [
-  { label: 'Hierarchy', href: '/dashboard/admin/hierarchy', icon: GitBranch },
-  { label: 'Users', href: '/dashboard/admin/users', icon: Users },
-  { label: 'Recurring', href: '/dashboard/admin/recurring', icon: RefreshCw },
+  { label: 'Users',      href: '/dashboard/admin/users',      icon: Users },
+  { label: 'Roles',      href: '/dashboard/admin/roles',      icon: ShieldCheck },
+  { label: 'Hierarchy',  href: '/dashboard/admin/hierarchy',  icon: GitBranch },
   { label: 'Attendance', href: '/dashboard/admin/attendance', icon: ClipboardList },
+  { label: 'Recurring',  href: '/dashboard/admin/recurring',  icon: RefreshCw },
 ];
 
 interface Props {
@@ -104,7 +107,7 @@ export function AppSidebar({ profile, mobileOpen = false, onMobileClose }: Props
           </Link>
         ))}
 
-        {/* Attendance link for non-admin attendance managers */}
+        {/* Attendance manager link — mark attendance for the team */}
         {!profile.is_org_admin && profile.can_mark_attendance && (
           <Link
             href="/dashboard/admin/attendance"
@@ -117,7 +120,7 @@ export function AppSidebar({ profile, mobileOpen = false, onMobileClose }: Props
             )}
           >
             <ClipboardList className="w-4 h-4 shrink-0" />
-            Attendance
+            Mark Attendance
           </Link>
         )}
 

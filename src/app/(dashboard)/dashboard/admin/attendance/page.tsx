@@ -91,9 +91,7 @@ export default async function AttendancePage({
       profile: {
         id: row.profile.id,
         full_name: row.profile.full_name,
-        role: row.profile.role
-          ? { name: row.profile.role.name, color: row.profile.role.color }
-          : null,
+        role: null,
       },
       record: row.record
         ? {
@@ -157,9 +155,7 @@ export default async function AttendancePage({
       profile: {
         id: row.profile.id,
         full_name: row.profile.full_name,
-        role: row.profile.role
-          ? { name: row.profile.role.name, color: row.profile.role.color }
-          : null,
+        role: null,
       },
       present: row.present,
       absent: row.absent,
