@@ -158,25 +158,25 @@ Build in this exact order. Each section depends on the one above it.
 
 
 ────────────────────────────────────────────────────────────────────────────────
-13. RECURRING TASKS
+13. RECURRING TASKS ✓ DONE
 ────────────────────────────────────────────────────────────────────────────────
 
-[ ] Create recurring template — title, task type, cadence
+[x] Create recurring template — title, task type, cadence
     (monthly / quarterly / half_yearly / annually), default priority,
     default assignee role, default client, days before due date
-[ ] List recurring templates (admin only)
-[ ] Edit template
-[ ] Activate / deactivate template
-[ ] Cron job — runs at 1 AM IST daily, checks each active template:
+[x] List recurring templates (admin only)
+[x] Edit template
+[x] Activate / deactivate template
+[x] Cron job — runs at 1 AM UTC (6:30 AM IST) daily, checks each active template:
     monthly → fires on 1st of every month
     quarterly → fires on 1st of Jan, Apr, Jul, Oct
     half_yearly → fires on 1st of Apr and Oct (Indian financial year)
     annually → fires on 1st of Apr only
-[ ] On fire — creates a real task from the template with correct due date
-[ ] Orphan protection — if task_access insert fails after task creation,
+[x] On fire — creates a real task from the template with correct due date
+[x] Orphan protection — if task_access insert fails after task creation,
     immediately delete the task so no orphan exists
-[ ] Cron protected by a secret key in request header
-[ ] Healthcheck ping on successful cron run
+[x] Cron protected by CRON_SECRET in Authorization header
+[x] Healthcheck — returns JSON with tasksCreated, errors, log per run
 
 
 ────────────────────────────────────────────────────────────────────────────────

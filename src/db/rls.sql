@@ -361,6 +361,59 @@ CREATE POLICY "attendance: admin or manager can update"
 
 
 -- =============================================================================
+-- RECURRING_TEMPLATES
+-- Only org admins can read and manage templates.
+-- Cron job uses service role (bypasses RLS entirely).
+-- =============================================================================
+
+ALTER TABLE recurring_templates ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "recurring: admin can read" ON recurring_templates;
+CREATE POLICY "recurring: admin can read"
+  ON recurring_templates FOR SELECT
+  USING (org_id = get_my_org_id() AND is_org_admin());
+
+DROP POLICY IF EXISTS "recurring: admin can insert" ON recurring_templates;
+CREATE POLICY "recurring: admin can insert"
+  ON recurring_templates FOR INSERT
+  WITH CHECK (org_id = get_my_org_id() AND is_org_admin());
+
+DROP POLICY IF EXISTS "recurring: admin can update" ON recurring_templates;
+CREATE POLICY "recurring: admin can update"
+  ON recurring_templates FOR UPDATE
+  USING (org_id = get_my_org_id() AND is_org_admin());
+
+
+-- =============================================================================
+-- RECURRING_TEMPLATES
+-- Only org admins can read and manage templates.
+-- Cron job uses service role — bypasses RLS entirely.
+-- =============================================================================
+
+ALTER TABLE recurring_templates ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "recurring: admin can read" ON recurring_templates;
+CREATE POLICY "recurring: admin can read"
+  ON recurring_templates FOR SELECT
+  USING (org_id = get_my_org_id() AND is_org_admin());
+
+DROP POLICY IF EXISTS "recurring: admin can insert" ON recurring_templates;
+CREATE POLICY "recurring: admin can insert"
+  ON recurring_templates FOR INSERT
+  WITH CHECK (org_id = get_my_org_id() AND is_org_admin());
+
+DROP POLICY IF EXISTS "recurring: admin can update" ON recurring_templates;
+CREATE POLICY "recurring: admin can update"
+  ON recurring_templates FOR UPDATE
+  USING (org_id = get_my_org_id() AND is_org_admin());
+
+DROP POLICY IF EXISTS "recurring: admin can delete" ON recurring_templates;
+CREATE POLICY "recurring: admin can delete"
+  ON recurring_templates FOR DELETE
+  USING (org_id = get_my_org_id() AND is_org_admin());
+
+
+-- =============================================================================
 -- DONE
 -- =============================================================================
 -- Verify with:

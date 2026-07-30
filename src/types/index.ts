@@ -1,8 +1,8 @@
-import type { InferSelectModel } from 'drizzle-orm';
+import type { InferSelectModel, InferInsertModel } from 'drizzle-orm';
 import type {
   orgs, roles, profiles, clients,
   tasks, task_access, task_audit_log, task_messages,
-  reporting_relationships, attendance_records,
+  reporting_relationships, attendance_records, recurring_templates,
 } from '@/db/schema';
 
 export type Org                   = InferSelectModel<typeof orgs>;
@@ -51,6 +51,9 @@ export type TaskDetail = Task & {
   audit_log:  (TaskAuditLog & { actor: { full_name: string } })[];
   my_access:  AccessLevel | null;
 };
+
+export type RecurringTemplate    = InferSelectModel<typeof recurring_templates>;
+export type NewRecurringTemplate = InferInsertModel<typeof recurring_templates>;
 
 // Stub — notifications table not built yet
 export type Notification = {

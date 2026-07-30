@@ -10,6 +10,7 @@ import {
   index,
   primaryKey,
   jsonb,
+  integer,
 } from 'drizzle-orm/pg-core';
 
 // ---------------------------------------------------------------------------
@@ -41,6 +42,10 @@ export const accessLevel = pgEnum('access_level', [
 export const auditAction = pgEnum('audit_action', [
   'created', 'status_changed', 'reassigned',
   'access_granted', 'edited', 'comment_added',
+]);
+
+export const recurringCadence = pgEnum('recurring_cadence', [
+  'monthly', 'quarterly', 'half_yearly', 'annually',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -260,4 +265,34 @@ export const attendance_records = pgTable(
     unique('attendance_user_date_unique').on(table.user_id, table.date),
     index('attendance_org_date_idx').on(table.org_id, table.date),
   ],
+);
+
+// ---------------------------------------------------------------------------
+// recurring_templates
+//
+// Admin-created templates that the cron job uses to spawn real tasks.
+// cadence controls when it fires (see /api/cron/recurring for logic).
+// due_in_days: task due_at is set to (creation_date + due_in_days).
+// default_assignee_role_id: cron picks the first active user with this role.
+// If no user found, task is created as open pool.
+// ---------------------------------------------------------------------------
+
+export const recurring_templates = pgTable(
+  'recurring_templates',
+  {
+    id:                       uuid('id').primaryKey().defaultRandom(),
+    org_id:                   uuid('org_id').notNull().references(() => orgs.id),
+    title:                    text('title').notNull(),
+    task_type:                taskType('task_type').notNull(),
+    cadence:                  recurringCadence('cadence').notNull(),
+    priority:                 taskPriority('priority').notNull().default('medium'),
+    default_assignee_role_id: uuid('default_assignee_role_id').references(() => roles.id),
+    default_client_id:        uuid('default_client_id').references(() => clients.id),
+    due_in_days:              integer('due_in_days').notNull().default(30),
+    is_active:                boolean('is_active').notNull().default(true),
+    created_by:               uuid('created_by').notNull().references(() => profiles.id),
+    created_at:               timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updated_at:               timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index('recurring_org_id_idx').on(table.org_id)],
 );

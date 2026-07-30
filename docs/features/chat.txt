@@ -1,0 +1,262 @@
+AGENT TASK: Teach the Filio task chat system from zero to interview-ready.
+
+The reader has no prior knowledge of WebSockets, Supabase Realtime, or real-time UI patterns.
+Your job is to produce a complete, plain-English explanation of how the task chat feature works —
+from the moment a user types a message to the moment it appears on another user's screen —
+and then run through every hard interview question someone could ask about it.
+
+====================================================================================
+STEP 1 — READ THESE FILES COMPLETELY (in this order)
+====================================================================================
+
+1. src/db/schema.ts
+   → Find the task_messages table definition. Note every column, its type, and why it exists.
+
+2. src/db/rls.sql
+   → Find the two policies on task_messages (SELECT and INSERT).
+     Note exactly what conditions are checked.
+
+3. src/actions/tasks.ts
+   → Find getTaskMessages() and sendMessage().
+     Read every line. Note every validation, every DB call, every return shape.
+
+4. src/components/tasks/TaskChat.tsx
+   → Read the entire component. Pay attention to:
+     - the sentIds ref
+     - the useEffect Realtime subscription
+     - the handleSubmit / startTransition block
+     - how memberMap is used
+
+5. src/app/(dashboard)/dashboard/tasks/[id]/page.tsx
+   → See how the page fetches initialMessages, currentUserName, and members,
+     and how it passes them as props to TaskChat.
+
+====================================================================================
+STEP 2 — WRITE THE EXPLANATION (structure it exactly as below)
+====================================================================================
+
+---
+
+## 1. What is "real-time chat" and why is it harder than a normal form?
+
+Explain in plain English why a regular HTTP request is not enough to make a chat
+work for multiple users. Explain what a WebSocket is conceptually (persistent
+two-way pipe vs. request-response). Keep this to ~150 words — just enough so the
+reader understands WHY we need something special.
+
+---
+
+## 2. What is Supabase Realtime and how does it work?
+
+Explain Postgres CDC (Change Data Capture) — when a row is inserted into
+task_messages in the database, Postgres writes an event to its WAL (Write-Ahead
+Log). Supabase's Realtime server tails the WAL and broadcasts matching events
+over WebSocket to subscribed clients.
+
+Explain what postgres_changes means: we subscribe to INSERT events on the
+task_messages table, filtered by task_id. Only inserts for THIS task come through.
+
+Explain that this is NOT a custom WebSocket server we wrote — it is a managed
+service. Our only code is the client-side subscription.
+
+---
+
+## 3. The database schema — what does a message row look like?
+
+Show the columns of task_messages and explain each one:
+- id (UUID, primary key)
+- task_id (which task this message belongs to)
+- org_id (multi-tenancy — never cross org boundaries)
+- sender_id (who sent it, FK to profiles)
+- body (the text content)
+- created_at (timestamp)
+
+Note there is no is_active or soft-delete on messages — messages are permanent
+once sent.
+
+---
+
+## 4. The server action — what happens when sendMessage() runs?
+
+Walk through sendMessage() line by line in plain English:
+1. getCurrentUser() — confirm there is a logged-in session
+2. UUID validation on taskId
+3. Body trimmed and length checked (1–2000 chars)
+4. DB query confirms the task exists in the user's org
+5. is_task_member check — user must be on the task
+6. Insert into task_messages
+7. Insert into task_audit_log (comment_added)
+8. Returns the full message row with sender name attached
+
+Note that the server action is what actually writes to the database.
+The Realtime subscription is a READ-ONLY listener — it never writes.
+
+---
+
+## 5. The component — what does TaskChat.tsx do on mount?
+
+Explain the initial render:
+- initialMessages come from the server (the page.tsx fetched them before rendering)
+- No loading spinner — messages are there on first paint
+
+Explain the useEffect that runs on mount:
+- Creates a Supabase browser client
+- Opens a channel named task-chat-{taskId}
+- Subscribes to INSERT events on task_messages where task_id = this task's ID
+- When a new insert arrives, checks sentIds — if the ID is in the set, skip it
+  (this is OUR OWN message echoing back)
+- Otherwise, looks up the sender's name from memberMap and appends the message
+  to local state
+- On unmount: supabase.removeChannel(channel) — this closes the WebSocket
+  subscription so there is no memory leak
+
+---
+
+## 6. The optimistic send — what happens when the user hits Send?
+
+Walk through handleSubmit step by step:
+
+Step 1: A fake (optimistic) message is created with crypto.randomUUID() as its ID.
+        It is appended to local state immediately — the user sees their message at once.
+
+Step 2: The input is cleared so the user can type the next message.
+
+Step 3: startTransition wraps the async server action call so React treats it as
+        a non-urgent update.
+
+Step 4: sendMessage(taskId, draft) runs on the server. The database does the real
+        INSERT. The server returns the confirmed message row with its real UUID.
+
+Step 5: sentIds.current.add(res.data.id) — we register the REAL ID in the dedup set
+        BEFORE the Realtime echo arrives. This is the critical timing step.
+
+Step 6: The optimistic placeholder is replaced with the confirmed message
+        (same position in the list, now with the real ID).
+
+Step 7 (error path): If sendMessage returns an error, the optimistic message is
+        removed from state and the draft text is put back in the input so the user
+        can try again.
+
+---
+
+## 7. The deduplication problem — why does the echo happen and how is it solved?
+
+Explain the problem:
+- When User A sends a message, the server inserts a row into task_messages.
+- The Realtime CDC picks up that insert and broadcasts it to ALL subscribers of
+  that task's channel — including User A themselves.
+- Without deduplication, User A would see their message appear TWICE: once from
+  the optimistic update, and once from the Realtime echo.
+
+Explain the solution (sentIds):
+- sentIds is a useRef<Set<string>> — a Set that persists across renders without
+  causing re-renders.
+- After the server confirms and returns the real message ID, that ID is added to
+  sentIds BEFORE the echo can arrive.
+- In the Realtime handler, every incoming insert checks: "is this ID in sentIds?"
+  If yes: delete it from the set and return early — do not append to state.
+  If no: this is someone else's message — append it.
+
+Explain why the timing matters: the server action round-trip (send → DB insert →
+return to client) takes ~100–300ms. The CDC event from Supabase Realtime also
+takes ~100–300ms to reach the client. By registering the real ID the instant we
+receive the server response, we get ahead of the echo in almost all cases.
+
+---
+
+## 8. Security — how do we know only authorized users can read and send?
+
+Explain two layers:
+
+Layer 1 — Server Action (application layer):
+  sendMessage() explicitly checks:
+  - Is there a valid session? (getCurrentUser)
+  - Does this task exist in the user's org?
+  - Is the user a member of this task? (task_access table)
+  If any check fails, the function returns an error and nothing is inserted.
+
+Layer 2 — RLS (database layer, last line of defence):
+  The INSERT policy on task_messages checks:
+  - org_id = get_my_org_id() — cannot write to another org's messages
+  - sender_id = auth.uid() — cannot impersonate another sender
+  - Task must exist in the user's org and they must be a member or it's open pool
+
+  The SELECT policy on task_messages checks:
+  - org_id = get_my_org_id()
+  - Task must be visible to the user (open pool OR is_task_member)
+
+  For Supabase Realtime specifically: postgres_changes respects RLS. If a CDC
+  event fires for a row the user's RLS policy would not allow them to SELECT,
+  Supabase will not deliver that event to that client. Our subscription filter
+  (task_id=eq.{taskId}) is an additional filter, but RLS is the security guarantee.
+
+---
+
+## 9. Known limitations — what would you improve in v2?
+
+List each limitation clearly. For each one: what is the problem, what would break,
+and what is the fix.
+
+Known issues to cover:
+- No pagination: all messages loaded at once, will break at scale.
+  Fix: LIMIT 50 ORDER BY created_at DESC, infinite scroll up.
+- Stale memberMap closure: if a new member joins after the chat component mounts,
+  the Realtime handler uses the old memberMap and shows 'Team member' instead of
+  their name. Fix: store memberMap in a useRef and update it when members prop changes.
+- No connection status indicator: if the user's internet drops, the WebSocket
+  disconnects silently. They think the chat is live when it is not.
+  Fix: listen to channel system events and show a "Reconnecting..." banner.
+- Race condition (rare): if the CDC echo arrives before the server action response
+  is processed by the client, a duplicate message can appear. Fix: check for
+  body + sender + approximate timestamp match, or use a client-generated UUID sent
+  to the server so the real ID is known before insert.
+- No read receipts: no way to know who has seen a message. Fine for v1 internal tool.
+
+---
+
+## 10. Interview Q&A — common questions with model answers
+
+Write a model answer for EACH of the following questions. Each answer should be
+2–5 sentences, confident, and show understanding of the WHY not just the WHAT.
+
+Q1: Why did you choose Supabase Realtime over a custom WebSocket server?
+
+Q2: How does the deduplication work when a user sends a message?
+
+Q3: What is the risk if you skip the sentIds step?
+
+Q4: How does RLS protect the Realtime subscription? Can a user subscribe to
+    another user's task by guessing the taskId?
+
+Q5: What is the stale closure bug in the memberMap and how would you fix it?
+
+Q6: What happens if the user goes offline for 30 seconds and comes back?
+    Are any messages lost?
+
+Q7: How would you add pagination to the message history?
+
+Q8: Why is sendMessage() a server action instead of a client-side fetch to
+    a REST endpoint?
+
+Q9: What does startTransition do here and why is it used?
+
+Q10: How does Postgres CDC work? What is the WAL?
+
+Q11: If two users send a message at exactly the same millisecond, what happens?
+
+Q12: What would you add to make this production-ready for a firm with 50 users
+     and 5000+ tasks?
+
+====================================================================================
+FORMAT RULES
+====================================================================================
+
+- Write in plain English. No jargon without an explanation.
+- Use code snippets from the actual files to illustrate, not invented examples.
+- Do not skip any section. All 10 sections + all 12 Q&As are required.
+- Assume the reader is a strong developer who has never worked with WebSockets or
+  Supabase Realtime before.
+- Answers to Q&A should be confident and interview-ready — write them as if the
+  reader is saying them out loud to an interviewer.
+
+====================================================================================

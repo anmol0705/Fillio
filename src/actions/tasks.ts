@@ -630,9 +630,7 @@ export async function claimPoolTask(
 // load; Realtime handles incremental updates after that)
 // ---------------------------------------------------------------------------
 
-export async function getTaskMessages(taskId: string): Promise<
-  { error: string; data: null } | { error: null; data: TaskMessageWithSender[] }
-> {
+export async function getTaskMessages(taskId: string): Promise<{ error: string; data: null } | { error: null; data: TaskMessageWithSender[] }> {
   if (!z.string().uuid().safeParse(taskId).success) {
     return { error: 'Invalid task ID', data: null };
   }

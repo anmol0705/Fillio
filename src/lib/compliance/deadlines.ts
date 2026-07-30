@@ -6,7 +6,7 @@ import type { Task } from '@/types';
 // Types
 // ---------------------------------------------------------------------------
 
-type TaskType = Task['task_type'];
+type TaskType = Task['type'];
 
 export type ComplianceDeadline = {
   id: string;
