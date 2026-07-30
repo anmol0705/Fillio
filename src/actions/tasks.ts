@@ -2,7 +2,7 @@
 import 'server-only';
 
 import { z } from 'zod';
-import { and, desc, eq, inArray, or } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, or } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 
 import { db } from '@/db';
@@ -588,7 +588,25 @@ export async function claimPoolTask(
 
   const userId = result.profile.id;
 
-  await db.update(tasks).set({ assignee_id: userId, updated_at: new Date() }).where(eq(tasks.id, taskId));
+  // Atomic conditional update — only succeeds if assignee_id is still NULL or
+  // already this user at the moment the DB executes the statement. This prevents
+  // a race where two concurrent claims both pass the application-level check and
+  // the second silently overwrites the first.
+  const updated = await db
+    .update(tasks)
+    .set({ assignee_id: userId, updated_at: new Date() })
+    .where(
+      and(
+        eq(tasks.id, taskId),
+        eq(tasks.is_open_pool, true),
+        or(isNull(tasks.assignee_id), eq(tasks.assignee_id, userId)),
+      )
+    )
+    .returning({ id: tasks.id });
+
+  if (updated.length === 0) {
+    return { error: 'This task was just claimed by someone else. Refresh to see the latest.' };
+  }
 
   await db
     .insert(task_access)
