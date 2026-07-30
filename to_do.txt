@@ -209,18 +209,11 @@ Build in this exact order. Each section depends on the one above it.
 
 
 ────────────────────────────────────────────────────────────────────────────────
-16. EMAIL DIGEST
+16. EMAIL DIGEST — DEFERRED (not needed at this stage)
 ────────────────────────────────────────────────────────────────────────────────
 
-[ ] Daily email to each active user listing:
-    — their overdue tasks
-    — tasks due in the next 7 days
-[ ] Email sent via Resend
-[ ] React Email template for formatting
-[ ] Cron job runs once a day (separate from recurring task cron)
-[ ] Batch queries — fetch data for all users in 3 queries total,
-    not one query per user (avoids N+1 at scale)
-[ ] Cron protected by secret key
+Skipped intentionally. In-app notification bell (section 14) is sufficient for
+the founding partner's workflow. Will revisit if users request email summaries.
 
 
 ────────────────────────────────────────────────────────────────────────────────
