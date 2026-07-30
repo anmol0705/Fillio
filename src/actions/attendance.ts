@@ -1,4 +1,5 @@
 'use server';
+import 'server-only';
 
 import { z } from 'zod';
 import { db } from '@/db';
@@ -391,6 +392,12 @@ export async function getMyAttendance(
   const nextYear  = parsed.data.month === 12 ? parsed.data.year + 1 : parsed.data.year;
   const endDate   = `${nextYear}-${String(nextMonth).padStart(2, '0')}-01`;
 
+  const profile = await db.query.profiles.findFirst({
+    where: (p, { eq }) => eq(p.id, user.id),
+    columns: { org_id: true },
+  });
+  if (!profile) return { error: 'Profile not found' };
+
   const rows = await db
     .select({
       date:   attendance_records.date,
@@ -400,6 +407,7 @@ export async function getMyAttendance(
     .from(attendance_records)
     .where(
       and(
+        eq(attendance_records.org_id, profile.org_id),
         eq(attendance_records.user_id, user.id),
         gte(attendance_records.date, startDate),
         lt(attendance_records.date, endDate),

@@ -78,6 +78,7 @@ export const roles = pgTable(
     org_id:     uuid('org_id').notNull().references(() => orgs.id),
     name:       text('name').notNull(),
     colour:     text('colour').notNull().default('#6B7280'),
+    is_active:  boolean('is_active').notNull().default(true),
     created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [index('roles_org_id_idx').on(table.org_id)],

@@ -36,6 +36,11 @@ function shouldFireToday(cadence: string, today: Date): boolean {
 // ---------------------------------------------------------------------------
 
 export async function GET(request: Request) {
+  // Guard against missing CRON_SECRET (misconfigured env)
+  if (!process.env.CRON_SECRET) {
+    return NextResponse.json({ error: 'Server misconfiguration' }, { status: 500 });
+  }
+
   // Auth check
   const authHeader = request.headers.get('authorization');
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {

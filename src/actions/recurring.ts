@@ -168,10 +168,9 @@ export async function deleteRecurringTemplate(
   const uuidResult = z.string().uuid().safeParse(id);
   if (!uuidResult.success) return { error: 'Invalid template ID' };
 
-  // Hard delete is acceptable for templates — they carry no audit trail.
-  // A deleted template simply stops spawning tasks; no historical harm.
   await db
-    .delete(recurring_templates)
+    .update(recurring_templates)
+    .set({ is_active: false })
     .where(
       and(
         eq(recurring_templates.id, id),

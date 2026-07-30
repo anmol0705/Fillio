@@ -6,6 +6,7 @@ import { and, desc, eq, inArray, isNull, or } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 
 import { db } from '@/db';
+import { createAdminClient } from '@/lib/supabase/server';
 import { tasks, task_access, task_audit_log, task_messages, profiles, clients } from '@/db/schema';
 import { getCurrentUser } from '@/lib/auth/getUser';
 import { insertNotification } from '@/actions/notifications';
@@ -93,7 +94,8 @@ async function insertAuditLog(entry: {
   action:   typeof task_audit_log.$inferInsert['action'];
   payload?: Record<string, unknown>;
 }) {
-  await db.insert(task_audit_log).values({
+  const admin = createAdminClient();
+  await admin.from('task_audit_log').insert({
     task_id:  entry.task_id,
     org_id:   entry.org_id,
     actor_id: entry.actor_id,
@@ -305,7 +307,7 @@ export async function getTaskDetail(taskId: string): Promise<
   const profileMap = new Map(allProfiles.map((p) => [p.id, p]));
 
   const detail: TaskDetail = {
-    ...(task as any),
+    ...task,
     creator:  profileMap.get(task.creator_id) ?? { id: task.creator_id, full_name: 'Unknown' },
     assignee: task.assignee_id ? (profileMap.get(task.assignee_id) ?? null) : null,
     client:   clientRow ?? null,
@@ -441,7 +443,7 @@ export async function updateTask(
   await db
     .update(tasks)
     .set({ ...rest, due_at: due_at !== undefined ? (due_at ? new Date(due_at) : null) : undefined, updated_at: new Date() })
-    .where(eq(tasks.id, taskId));
+    .where(and(eq(tasks.id, taskId), eq(tasks.org_id, result.profile.org_id)));
 
   // If assignee changed, update task_access and notify new assignee
   if (newAssigneeId !== undefined && newAssigneeId !== prevAssigneeId) {
@@ -506,7 +508,7 @@ export async function updateTaskStatus(
     return { error: `Cannot transition from ${task.status} to ${newStatus}` };
   }
 
-  await db.update(tasks).set({ status: newStatus, updated_at: new Date() }).where(eq(tasks.id, taskId));
+  await db.update(tasks).set({ status: newStatus, updated_at: new Date() }).where(and(eq(tasks.id, taskId), eq(tasks.org_id, task.org_id)));
 
   await insertAuditLog({
     task_id:  taskId,
@@ -546,7 +548,7 @@ export async function deleteTask(
   const access = await requireTaskAccess(taskId, result.profile.id, 'owner');
   if (!access.ok) return { error: access.error };
 
-  await db.update(tasks).set({ is_active: false, updated_at: new Date() }).where(eq(tasks.id, taskId));
+  await db.update(tasks).set({ is_active: false, updated_at: new Date() }).where(and(eq(tasks.id, taskId), eq(tasks.org_id, result.profile.org_id)));
 
   return { data: 'ok' };
 }

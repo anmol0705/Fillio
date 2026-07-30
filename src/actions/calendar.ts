@@ -43,7 +43,16 @@ async function canAssignTo(
   assignerId: string,
   assigneeId: string,
   isAdmin: boolean,
+  orgId: string,
 ): Promise<boolean> {
+  // Always verify the assignee exists in this org — even admins cannot cross-tenant reference
+  const assigneeProfile = await db.query.profiles.findFirst({
+    where: (p, { and: qAnd, eq: qEq }) =>
+      qAnd(qEq(p.id, assigneeId), qEq(p.org_id, orgId), qEq(p.is_active, true)),
+    columns: { id: true },
+  });
+  if (!assigneeProfile) return false;
+
   if (isAdmin) return true;
   if (assignerId === assigneeId) return true;
   const rel = await db.query.reporting_relationships.findFirst({
@@ -160,7 +169,7 @@ export async function createCalendarEvent(
   // Assignment permission check
   const effectiveAssignee = assigned_to ?? null;
   if (effectiveAssignee && effectiveAssignee !== user.id) {
-    const allowed = await canAssignTo(user.id, effectiveAssignee, profile.is_org_admin);
+    const allowed = await canAssignTo(user.id, effectiveAssignee, profile.is_org_admin, profile.org_id);
     if (!allowed) return { error: 'You can only assign events to your direct reports', data: null };
   }
 
@@ -213,7 +222,7 @@ export async function updateCalendarEvent(
 
   const effectiveAssignee = assigned_to ?? null;
   if (effectiveAssignee && effectiveAssignee !== user.id) {
-    const allowed = await canAssignTo(user.id, effectiveAssignee, profile.is_org_admin);
+    const allowed = await canAssignTo(user.id, effectiveAssignee, profile.is_org_admin, profile.org_id);
     if (!allowed) return { error: 'You can only assign events to your direct reports', data: null };
   }
 

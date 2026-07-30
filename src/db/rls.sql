@@ -119,7 +119,13 @@ CREATE POLICY "profiles: member can read own org"
 DROP POLICY IF EXISTS "profiles: member can update own row" ON profiles;
 CREATE POLICY "profiles: member can update own row"
   ON profiles FOR UPDATE
-  USING (id = auth.uid());
+  USING (id = auth.uid() AND org_id = get_my_org_id())
+  WITH CHECK (
+    id = auth.uid()
+    AND org_id = get_my_org_id()
+    AND is_org_admin = (SELECT is_org_admin FROM profiles WHERE id = auth.uid())
+    AND can_mark_attendance = (SELECT can_mark_attendance FROM profiles WHERE id = auth.uid())
+  );
 
 
 -- =============================================================================
@@ -196,6 +202,7 @@ CREATE POLICY "task_access: member can read own access rows"
     )
   );
 
+-- task_access INSERT: must already be a member of the task (prevents self-granting via API)
 DROP POLICY IF EXISTS "task_access: member can insert" ON task_access;
 CREATE POLICY "task_access: member can insert"
   ON task_access FOR INSERT
@@ -205,8 +212,10 @@ CREATE POLICY "task_access: member can insert"
       WHERE t.id = task_access.task_id
         AND t.org_id = get_my_org_id()
     )
+    AND is_task_member(task_access.task_id)
   );
 
+-- task_access UPDATE: must already be a member of the task
 DROP POLICY IF EXISTS "task_access: member can upsert" ON task_access;
 CREATE POLICY "task_access: member can upsert"
   ON task_access FOR UPDATE
@@ -216,6 +225,15 @@ CREATE POLICY "task_access: member can upsert"
       WHERE t.id = task_access.task_id
         AND t.org_id = get_my_org_id()
     )
+    AND is_task_member(task_access.task_id)
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM tasks t
+      WHERE t.id = task_access.task_id
+        AND t.org_id = get_my_org_id()
+    )
+    AND is_task_member(task_access.task_id)
   );
 
 
@@ -239,10 +257,9 @@ CREATE POLICY "task_audit_log: member can read"
     )
   );
 
+-- task_audit_log: NO INSERT policy — inserts go through createAdminClient() only.
+-- This table is immutable by design; direct user inserts are forbidden.
 DROP POLICY IF EXISTS "task_audit_log: member can insert" ON task_audit_log;
-CREATE POLICY "task_audit_log: member can insert"
-  ON task_audit_log FOR INSERT
-  WITH CHECK (org_id = get_my_org_id());
 
 
 -- =============================================================================
@@ -358,30 +375,6 @@ CREATE POLICY "attendance: admin or manager can update"
       OR (SELECT can_mark_attendance FROM profiles WHERE id = auth.uid())
     )
   );
-
-
--- =============================================================================
--- RECURRING_TEMPLATES
--- Only org admins can read and manage templates.
--- Cron job uses service role (bypasses RLS entirely).
--- =============================================================================
-
-ALTER TABLE recurring_templates ENABLE ROW LEVEL SECURITY;
-
-DROP POLICY IF EXISTS "recurring: admin can read" ON recurring_templates;
-CREATE POLICY "recurring: admin can read"
-  ON recurring_templates FOR SELECT
-  USING (org_id = get_my_org_id() AND is_org_admin());
-
-DROP POLICY IF EXISTS "recurring: admin can insert" ON recurring_templates;
-CREATE POLICY "recurring: admin can insert"
-  ON recurring_templates FOR INSERT
-  WITH CHECK (org_id = get_my_org_id() AND is_org_admin());
-
-DROP POLICY IF EXISTS "recurring: admin can update" ON recurring_templates;
-CREATE POLICY "recurring: admin can update"
-  ON recurring_templates FOR UPDATE
-  USING (org_id = get_my_org_id() AND is_org_admin());
 
 
 -- =============================================================================

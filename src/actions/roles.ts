@@ -44,7 +44,7 @@ export async function getRoles(): Promise<
   if (!result.ok) return { error: result.error, data: null };
 
   const data = await db.query.roles.findMany({
-    where: (r, { eq }) => eq(r.org_id, result.admin.org_id),
+    where: (r, { and: qAnd, eq }) => qAnd(eq(r.org_id, result.admin.org_id), eq(r.is_active, true)),
     orderBy: (r, { asc }) => [asc(r.name)],
   });
 
@@ -148,7 +148,8 @@ export async function deleteRole(
   }
 
   await db
-    .delete(roles)
+    .update(roles)
+    .set({ is_active: false })
     .where(and(eq(roles.id, roleId), eq(roles.org_id, result.admin.org_id)));
 
   return { data: 'ok' };

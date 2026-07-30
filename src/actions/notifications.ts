@@ -53,10 +53,16 @@ export async function markAsRead(
   const uuidCheck = z.string().uuid().safeParse(id);
   if (!uuidCheck.success) return { error: 'Invalid notification ID' };
 
+  const profile = await db.query.profiles.findFirst({
+    where: (p, { eq }) => eq(p.id, user.id),
+    columns: { org_id: true },
+  });
+  if (!profile) return { error: 'Profile not found' };
+
   await db
     .update(notifications)
     .set({ is_read: true })
-    .where(and(eq(notifications.id, id), eq(notifications.user_id, user.id)));
+    .where(and(eq(notifications.id, id), eq(notifications.user_id, user.id), eq(notifications.org_id, profile.org_id)));
 
   return { error: null };
 }
@@ -69,10 +75,16 @@ export async function markAllAsRead(): Promise<{ error: string } | { error: null
   const user = await getCurrentUser();
   if (!user) return { error: 'Not authenticated' };
 
+  const profile = await db.query.profiles.findFirst({
+    where: (p, { eq }) => eq(p.id, user.id),
+    columns: { org_id: true },
+  });
+  if (!profile) return { error: 'Profile not found' };
+
   await db
     .update(notifications)
     .set({ is_read: true })
-    .where(and(eq(notifications.user_id, user.id), eq(notifications.is_read, false)));
+    .where(and(eq(notifications.user_id, user.id), eq(notifications.org_id, profile.org_id), eq(notifications.is_read, false)));
 
   return { error: null };
 }
