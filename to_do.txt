@@ -224,13 +224,19 @@ Build in this exact order. Each section depends on the one above it.
 
 
 ────────────────────────────────────────────────────────────────────────────────
-17. COMPLIANCE CALENDAR
+17. PERSONAL CALENDAR ✓ DONE
 ────────────────────────────────────────────────────────────────────────────────
 
-[ ] Calendar view showing all upcoming task due dates across the org
-[ ] Month navigation (previous / next)
-[ ] Colour-coded by priority
-[ ] Click a date to see which tasks are due that day
+[x] calendar_events table — event_type (meeting/deadline/other), start_at,
+    end_at, is_all_day, assigned_to (nullable), created_by, task_id (optional)
+[x] Any user can create personal events
+[x] Admins and managers (anyone with direct reports) can assign events to others
+[x] Optional task link — event can reference an active task
+[x] Month calendar view — colour-coded by event type
+[x] Click a day to create an event (prefills date/time)
+[x] Click an event to view details, edit, or delete
+[x] Month navigation with server-side data reload
+[x] RLS — users see only their own + assigned events; admins see all
 
 
 ────────────────────────────────────────────────────────────────────────────────

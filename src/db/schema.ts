@@ -48,6 +48,10 @@ export const recurringCadence = pgEnum('recurring_cadence', [
   'monthly', 'quarterly', 'half_yearly', 'annually',
 ]);
 
+export const eventType = pgEnum('event_type', [
+  'meeting', 'deadline', 'other',
+]);
+
 // ---------------------------------------------------------------------------
 // orgs
 // ---------------------------------------------------------------------------
@@ -295,4 +299,38 @@ export const recurring_templates = pgTable(
     updated_at:               timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [index('recurring_org_id_idx').on(table.org_id)],
+);
+
+// ---------------------------------------------------------------------------
+// calendar_events
+//
+// Personal + assigned events. Any user can create personal events.
+// Admins and users with direct reports can set assigned_to to someone else.
+// assigned_to = null means the event belongs to the creator only.
+// task_id is optional — links the event to a specific task.
+// ---------------------------------------------------------------------------
+
+export const calendar_events = pgTable(
+  'calendar_events',
+  {
+    id:          uuid('id').primaryKey().defaultRandom(),
+    org_id:      uuid('org_id').notNull().references(() => orgs.id),
+    title:       text('title').notNull(),
+    description: text('description'),
+    event_type:  eventType('event_type').notNull().default('meeting'),
+    start_at:    timestamp('start_at', { withTimezone: true }).notNull(),
+    end_at:      timestamp('end_at', { withTimezone: true }).notNull(),
+    is_all_day:  boolean('is_all_day').notNull().default(false),
+    assigned_to: uuid('assigned_to').references(() => profiles.id),
+    created_by:  uuid('created_by').notNull().references(() => profiles.id),
+    task_id:     uuid('task_id').references(() => tasks.id),
+    created_at:  timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updated_at:  timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('events_org_id_idx').on(table.org_id),
+    index('events_assigned_to_idx').on(table.assigned_to),
+    index('events_created_by_idx').on(table.created_by),
+    index('events_start_at_idx').on(table.start_at),
+  ],
 );

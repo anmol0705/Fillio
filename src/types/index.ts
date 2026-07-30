@@ -3,6 +3,7 @@ import type {
   orgs, roles, profiles, clients,
   tasks, task_access, task_audit_log, task_messages,
   reporting_relationships, attendance_records, recurring_templates,
+  calendar_events,
 } from '@/db/schema';
 
 export type Org                   = InferSelectModel<typeof orgs>;
@@ -54,6 +55,14 @@ export type TaskDetail = Task & {
 
 export type RecurringTemplate    = InferSelectModel<typeof recurring_templates>;
 export type NewRecurringTemplate = InferInsertModel<typeof recurring_templates>;
+export type CalendarEvent        = InferSelectModel<typeof calendar_events>;
+
+// Shape used in the calendar UI — event + creator/assignee names resolved
+export type CalendarEventWithNames = CalendarEvent & {
+  creator:  { id: string; full_name: string };
+  assignee: { id: string; full_name: string } | null;
+  task:     { id: string; title: string } | null;
+};
 
 // Stub — notifications table not built yet
 export type Notification = {

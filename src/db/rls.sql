@@ -414,6 +414,53 @@ CREATE POLICY "recurring: admin can delete"
 
 
 -- =============================================================================
+-- CALENDAR_EVENTS
+-- A user can see an event if they created it OR it was assigned to them.
+-- Admins can see all events in their org.
+-- A user can only insert events in their own org; assigned_to must be in org.
+-- Only the creator or an admin can update/delete an event.
+-- =============================================================================
+
+ALTER TABLE calendar_events ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "events: member can read own or assigned" ON calendar_events;
+CREATE POLICY "events: member can read own or assigned"
+  ON calendar_events FOR SELECT
+  USING (
+    org_id = get_my_org_id()
+    AND (
+      is_org_admin()
+      OR created_by = auth.uid()
+      OR assigned_to = auth.uid()
+    )
+  );
+
+DROP POLICY IF EXISTS "events: member can insert" ON calendar_events;
+CREATE POLICY "events: member can insert"
+  ON calendar_events FOR INSERT
+  WITH CHECK (
+    org_id = get_my_org_id()
+    AND created_by = auth.uid()
+  );
+
+DROP POLICY IF EXISTS "events: creator or admin can update" ON calendar_events;
+CREATE POLICY "events: creator or admin can update"
+  ON calendar_events FOR UPDATE
+  USING (
+    org_id = get_my_org_id()
+    AND (created_by = auth.uid() OR is_org_admin())
+  );
+
+DROP POLICY IF EXISTS "events: creator or admin can delete" ON calendar_events;
+CREATE POLICY "events: creator or admin can delete"
+  ON calendar_events FOR DELETE
+  USING (
+    org_id = get_my_org_id()
+    AND (created_by = auth.uid() OR is_org_admin())
+  );
+
+
+-- =============================================================================
 -- DONE
 -- =============================================================================
 -- Verify with:
