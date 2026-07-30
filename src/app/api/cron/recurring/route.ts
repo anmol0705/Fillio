@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { and, eq, isNotNull } from 'drizzle-orm';
 import { db } from '@/db';
+
+export const dynamic = 'force-dynamic';
 import { createAdminClient } from '@/lib/supabase/server';
 import { recurring_templates, tasks, task_access, profiles } from '@/db/schema';
 
