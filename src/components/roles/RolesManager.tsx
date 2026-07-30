@@ -5,17 +5,9 @@ import { useRouter } from 'next/navigation';
 import { createRole, updateRole, deleteRole } from '@/actions/roles';
 import type { Role } from '@/types';
 
-// Preset palette — the firm picks from these instead of a free-form colour picker.
-// Stored as hex in the DB; rendered as coloured dots in the UI.
 const PALETTE = [
-  '#6B7280', // gray   (default)
-  '#3B82F6', // blue
-  '#10B981', // green
-  '#F59E0B', // amber
-  '#EF4444', // red
-  '#8B5CF6', // violet
-  '#EC4899', // pink
-  '#14B8A6', // teal
+  '#6B7280', '#3B82F6', '#10B981', '#F59E0B',
+  '#EF4444', '#8B5CF6', '#EC4899', '#14B8A6',
 ];
 
 interface Props {
@@ -26,27 +18,22 @@ export function RolesManager({ initialRoles }: Props) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
 
-  // Create form state
-  const [showCreate, setShowCreate] = useState(false);
-  const [newName, setNewName] = useState('');
-  const [newColour, setNewColour] = useState(PALETTE[0]);
+  const [roles, setRoles] = useState<Role[]>(initialRoles);
+
+  const [showCreate, setShowCreate]   = useState(false);
+  const [newName, setNewName]         = useState('');
+  const [newColour, setNewColour]     = useState(PALETTE[0]);
   const [createError, setCreateError] = useState<string | null>(null);
 
-  // Edit state — which role is currently being edited
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editName, setEditName] = useState('');
+  const [editingId, setEditingId]   = useState<string | null>(null);
+  const [editName, setEditName]     = useState('');
   const [editColour, setEditColour] = useState('');
-  const [editError, setEditError] = useState<string | null>(null);
+  const [editError, setEditError]   = useState<string | null>(null);
 
-  // General action error (delete)
   const [actionError, setActionError] = useState<string | null>(null);
 
-  function refresh() {
-    startTransition(() => router.refresh());
-  }
-
   // ---------------------------------------------------------------------------
-  // Create
+  // Create — append returned Role to local state immediately; no refresh needed
   // ---------------------------------------------------------------------------
 
   async function handleCreate(e: React.FormEvent) {
@@ -55,16 +42,16 @@ export function RolesManager({ initialRoles }: Props) {
     const result = await createRole({ name: newName.trim(), colour: newColour });
     if ('error' in result) {
       setCreateError(result.error);
-    } else {
-      setNewName('');
-      setNewColour(PALETTE[0]);
-      setShowCreate(false);
-      refresh();
+      return;
     }
+    setRoles((prev) => [...prev, result.data]);
+    setNewName('');
+    setNewColour(PALETTE[0]);
+    setShowCreate(false);
   }
 
   // ---------------------------------------------------------------------------
-  // Edit
+  // Edit — patch local state with the values we sent; no refresh needed
   // ---------------------------------------------------------------------------
 
   function startEdit(role: Role) {
@@ -81,14 +68,19 @@ export function RolesManager({ initialRoles }: Props) {
     const result = await updateRole({ roleId: editingId, name: editName.trim(), colour: editColour });
     if ('error' in result) {
       setEditError(result.error);
-    } else {
-      setEditingId(null);
-      refresh();
+      return;
     }
+    setRoles((prev) =>
+      prev.map((r) =>
+        r.id === editingId ? { ...r, name: editName.trim(), colour: editColour } : r
+      )
+    );
+    setEditingId(null);
   }
 
   // ---------------------------------------------------------------------------
-  // Delete
+  // Delete — remove from local state; role.id drives the sidebar user-count
+  // badge so also refresh that page's server component in the background
   // ---------------------------------------------------------------------------
 
   async function handleDelete(role: Role) {
@@ -97,9 +89,11 @@ export function RolesManager({ initialRoles }: Props) {
     const result = await deleteRole(role.id);
     if ('error' in result) {
       setActionError(result.error);
-    } else {
-      refresh();
+      return;
     }
+    setRoles((prev) => prev.filter((r) => r.id !== role.id));
+    // Refresh in background so users page role dropdown reflects the deletion
+    startTransition(() => router.refresh());
   }
 
   // ---------------------------------------------------------------------------
@@ -108,7 +102,6 @@ export function RolesManager({ initialRoles }: Props) {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="flex items-center justify-between gap-4">
         <div>
           <h1 className="text-xl font-semibold text-foreground">Roles</h1>
@@ -124,21 +117,17 @@ export function RolesManager({ initialRoles }: Props) {
         </button>
       </div>
 
-      {/* Action error (from delete) */}
       {actionError && (
         <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3">
           <p className="text-sm text-destructive">{actionError}</p>
         </div>
       )}
 
-      {/* Create form */}
       {showCreate && (
         <div className="rounded-lg border border-border bg-muted/20 p-4 space-y-4">
           <p className="text-sm font-medium text-foreground">New role</p>
           <form onSubmit={handleCreate} className="space-y-4">
-            {createError && (
-              <p className="text-sm text-destructive">{createError}</p>
-            )}
+            {createError && <p className="text-sm text-destructive">{createError}</p>}
             <div className="flex flex-wrap gap-3 items-end">
               <div className="space-y-1.5 flex-1 min-w-[160px]">
                 <label htmlFor="new-role-name" className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
@@ -166,7 +155,7 @@ export function RolesManager({ initialRoles }: Props) {
                 disabled={isPending}
                 className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors min-h-[40px]"
               >
-                {isPending ? 'Saving…' : 'Create'}
+                Create
               </button>
               <button
                 type="button"
@@ -180,8 +169,7 @@ export function RolesManager({ initialRoles }: Props) {
         </div>
       )}
 
-      {/* Roles list */}
-      {initialRoles.length === 0 && !showCreate ? (
+      {roles.length === 0 && !showCreate ? (
         <div className="rounded-lg border border-dashed border-border px-6 py-12 text-center">
           <p className="text-sm text-muted-foreground">No roles yet.</p>
           <p className="text-xs text-muted-foreground mt-1">
@@ -190,14 +178,11 @@ export function RolesManager({ initialRoles }: Props) {
         </div>
       ) : (
         <div className="rounded-lg border border-border divide-y divide-border overflow-hidden">
-          {initialRoles.map((role) =>
+          {roles.map((role) =>
             editingId === role.id ? (
-              // Inline edit row
               <div key={role.id} className="px-4 py-3 bg-muted/20">
                 <form onSubmit={handleUpdate} className="flex flex-wrap gap-3 items-end">
-                  {editError && (
-                    <p className="w-full text-sm text-destructive">{editError}</p>
-                  )}
+                  {editError && <p className="w-full text-sm text-destructive">{editError}</p>}
                   <div className="flex-1 min-w-[160px]">
                     <input
                       value={editName}
@@ -226,24 +211,11 @@ export function RolesManager({ initialRoles }: Props) {
                 </form>
               </div>
             ) : (
-              // Normal row
-              <div
-                key={role.id}
-                className="flex items-center gap-3 px-4 py-3 hover:bg-muted/20 transition-colors"
-              >
-                {/* Colour dot */}
-                <span
-                  className="w-3 h-3 rounded-full shrink-0 ring-1 ring-black/10"
-                  style={{ backgroundColor: role.colour }}
-                />
-                <span className="flex-1 text-sm font-medium text-foreground">
-                  {role.name}
-                </span>
+              <div key={role.id} className="flex items-center gap-3 px-4 py-3 hover:bg-muted/20 transition-colors">
+                <span className="w-3 h-3 rounded-full shrink-0 ring-1 ring-black/10" style={{ backgroundColor: role.colour }} />
+                <span className="flex-1 text-sm font-medium text-foreground">{role.name}</span>
                 <div className="flex gap-3">
-                  <button
-                    onClick={() => startEdit(role)}
-                    className="text-xs text-muted-foreground hover:text-foreground transition-colors"
-                  >
+                  <button onClick={() => startEdit(role)} className="text-xs text-muted-foreground hover:text-foreground transition-colors">
                     Edit
                   </button>
                   <button
@@ -262,10 +234,6 @@ export function RolesManager({ initialRoles }: Props) {
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// ColourPicker — a row of clickable colour swatches
-// ---------------------------------------------------------------------------
 
 function ColourPicker({ value, onChange }: { value: string; onChange: (c: string) => void }) {
   return (

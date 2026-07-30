@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useTransition } from 'react';
-import { useRouter } from 'next/navigation';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
@@ -14,13 +13,14 @@ import {
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { createTask } from '@/actions/tasks';
-import type { Client, Profile } from '@/types';
+import type { Client, Profile, TaskListItem } from '@/types';
 
 interface Props {
-  open:       boolean;
+  open:         boolean;
   onOpenChange: (v: boolean) => void;
-  clients:    Client[];
-  members:    Pick<Profile, 'id' | 'full_name'>[];
+  clients:      Client[];
+  members:      Pick<Profile, 'id' | 'full_name'>[];
+  onCreated:    (task: TaskListItem) => void;
 }
 
 const TASK_TYPES = [
@@ -43,8 +43,7 @@ const PRIORITIES = [
   { value: 'low',    label: 'Low' },
 ] as const;
 
-export function TaskForm({ open, onOpenChange, clients, members }: Props) {
-  const router = useRouter();
+export function TaskForm({ open, onOpenChange, clients, members, onCreated }: Props) {
   const [isPending, startTransition] = useTransition();
   const [error, setError] = useState('');
 
@@ -87,13 +86,28 @@ export function TaskForm({ open, onOpenChange, clients, members }: Props) {
         is_open_pool:   isPool,
       });
 
-      if ('error' in res) {
-        setError(res.error);
-        return;
-      }
+      if ('error' in res) { setError(res.error); return; }
+
+      // Build the list item immediately from what we know — no round-trip needed
+      const assigneeMember = members.find((m) => m.id === assignee);
+      const clientItem     = clients.find((c) => c.id === clientId);
+
+      onCreated({
+        id:           res.data.id,
+        title:        title.trim(),
+        type:         type as TaskListItem['type'],
+        status:       'not_started',
+        priority:     priority as TaskListItem['priority'],
+        due_at:       dueAt ? new Date(dueAt) : null,
+        is_open_pool: isPool,
+        created_at:   new Date(),
+        assignee:     assigneeMember ? { id: assigneeMember.id, full_name: assigneeMember.full_name } : null,
+        client:       clientItem    ? { id: clientItem.id,    name: clientItem.name }                : null,
+        my_access:    'owner',
+      });
+
       reset();
       onOpenChange(false);
-      router.refresh();
     });
   }
 
@@ -158,12 +172,7 @@ export function TaskForm({ open, onOpenChange, clients, members }: Props) {
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
               <Label htmlFor="tf-due">Due Date</Label>
-              <Input
-                id="tf-due"
-                type="date"
-                value={dueAt}
-                onChange={(e) => setDueAt(e.target.value)}
-              />
+              <Input id="tf-due" type="date" value={dueAt} onChange={(e) => setDueAt(e.target.value)} />
             </div>
             <div className="space-y-1">
               <Label htmlFor="tf-fy">Financial Year</Label>
@@ -211,9 +220,7 @@ export function TaskForm({ open, onOpenChange, clients, members }: Props) {
           </div>
 
           <div className="flex justify-end gap-2 pt-2">
-            <Button type="button" variant="outline" onClick={() => handleClose(false)}>
-              Cancel
-            </Button>
+            <Button type="button" variant="outline" onClick={() => handleClose(false)}>Cancel</Button>
             <Button type="submit" disabled={isPending}>
               {isPending ? 'Creating…' : 'Create Task'}
             </Button>

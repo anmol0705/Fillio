@@ -1,7 +1,6 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { TaskForm } from './TaskForm';
 import { TasksTable } from './TasksTable';
@@ -14,8 +13,16 @@ interface Props {
 }
 
 export function TasksClient({ initialTasks, clients, members }: Props) {
-  const router = useRouter();
-  const [open, setOpen] = useState(false);
+  const [open,  setOpen]  = useState(false);
+  const [tasks, setTasks] = useState<TaskListItem[]>(initialTasks);
+
+  function addTask(task: TaskListItem) {
+    setTasks((prev) => [task, ...prev]);
+  }
+
+  function removeTask(id: string) {
+    setTasks((prev) => prev.filter((t) => t.id !== id));
+  }
 
   return (
     <div className="space-y-4">
@@ -27,16 +34,14 @@ export function TasksClient({ initialTasks, clients, members }: Props) {
         <Button onClick={() => setOpen(true)}>New Task</Button>
       </div>
 
-      <TasksTable tasks={initialTasks} />
+      <TasksTable tasks={tasks} onRemove={removeTask} />
 
       <TaskForm
         open={open}
-        onOpenChange={(v) => {
-          setOpen(v);
-          if (!v) router.refresh();
-        }}
+        onOpenChange={setOpen}
         clients={clients}
         members={members}
+        onCreated={addTask}
       />
     </div>
   );

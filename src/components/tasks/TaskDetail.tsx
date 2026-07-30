@@ -1,10 +1,8 @@
 'use client';
 
 import { useState, useTransition } from 'react';
-import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
-import { Input } from '@/components/ui/input';
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
@@ -15,19 +13,25 @@ import { TaskTypeChip } from './TaskTypeChip';
 import { StatusStepper } from './StatusStepper';
 import { AuditLog } from './AuditLog';
 import { grantAccess } from '@/actions/tasks';
-import type { TaskDetail as TaskDetailType, Profile } from '@/types';
+import type { TaskDetail as TaskDetailType, TaskStatus, Profile } from '@/types';
 
 interface Props {
   task:    TaskDetailType;
   members: Pick<Profile, 'id' | 'full_name'>[];
 }
 
-export function TaskDetail({ task, members }: Props) {
-  const router = useRouter();
+export function TaskDetail({ task: initialTask, members }: Props) {
   const [isPending, startTransition] = useTransition();
   const [grantUserId, setGrantUserId] = useState('');
   const [grantLevel,  setGrantLevel]  = useState<'editor' | 'viewer'>('viewer');
   const [grantError,  setGrantError]  = useState('');
+
+  // Hold the full task in local state so status changes are instant
+  const [task, setTask] = useState<TaskDetailType>(initialTask);
+
+  function handleStatusChange(newStatus: TaskStatus) {
+    setTask((prev) => ({ ...prev, status: newStatus }));
+  }
 
   function submitGrant(e: React.FormEvent) {
     e.preventDefault();
@@ -37,8 +41,25 @@ export function TaskDetail({ task, members }: Props) {
     startTransition(async () => {
       const res = await grantAccess(task.id, grantUserId, grantLevel);
       if ('error' in res) { setGrantError(res.error); return; }
+
+      // Append the new access row optimistically
+      const member = members.find((m) => m.id === grantUserId);
+      setTask((prev) => ({
+        ...prev,
+        access: [
+          ...prev.access.filter((a) => a.user_id !== grantUserId),
+          {
+            id:         crypto.randomUUID(),
+            task_id:    task.id,
+            user_id:    grantUserId,
+            level:      grantLevel,
+            granted_by: null,
+            created_at: new Date(),
+            profile:    { full_name: member?.full_name ?? 'Unknown' },
+          } as TaskDetailType['access'][number],
+        ],
+      }));
       setGrantUserId('');
-      router.refresh();
     });
   }
 
@@ -96,7 +117,12 @@ export function TaskDetail({ task, members }: Props) {
 
         <div>
           <h2 className="text-sm font-medium mb-3">Move Status</h2>
-          <StatusStepper taskId={task.id} status={task.status} myAccess={task.my_access} />
+          <StatusStepper
+            taskId={task.id}
+            status={task.status}
+            myAccess={task.my_access}
+            onStatusChange={handleStatusChange}
+          />
         </div>
 
         <Separator />

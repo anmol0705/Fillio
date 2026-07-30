@@ -7,60 +7,108 @@ import { InviteUserForm } from './InviteUserForm';
 import type { Profile, Role } from '@/types';
 
 interface Props {
-  users: Profile[];
-  roles: Role[];
+  users:         Profile[];
+  roles:         Role[];
   currentUserId: string;
 }
 
 export function UsersTable({ users, roles, currentUserId }: Props) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
-  const [showInvite, setShowInvite] = useState(false);
+  const [showInvite, setShowInvite]   = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  function refresh() {
-    startTransition(() => router.refresh());
-  }
+  // Local list — mutated optimistically so UI responds instantly
+  const [userList, setUserList] = useState<Profile[]>(users);
 
-  // Build a quick lookup: role id → role (for rendering the coloured dot)
   const roleMap = new Map(roles.map((r) => [r.id, r]));
 
-  async function handleDeactivate(userId: string, name: string) {
-    if (!confirm(`Deactivate ${name}? They will no longer be able to log in.`)) return;
-    setActionError(null);
-    const result = await deactivateUser(userId);
-    if ('error' in result) setActionError(result.error);
-    else refresh();
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
+
+  function patchUser(userId: string, patch: Partial<Profile>) {
+    setUserList((prev) => prev.map((u) => (u.id === userId ? { ...u, ...patch } : u)));
   }
+
+  function revertUser(original: Profile) {
+    setUserList((prev) => prev.map((u) => (u.id === original.id ? original : u)));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Deactivate
+  // ---------------------------------------------------------------------------
+
+  async function handleDeactivate(user: Profile) {
+    if (!confirm(`Deactivate ${user.full_name}? They will no longer be able to log in.`)) return;
+    setActionError(null);
+    patchUser(user.id, { is_active: false });
+    const result = await deactivateUser(user.id);
+    if ('error' in result) {
+      revertUser(user);
+      setActionError(result.error);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Toggle admin
+  // ---------------------------------------------------------------------------
 
   async function handleToggleAdmin(user: Profile) {
     setActionError(null);
-    const result = await updateUser({ userId: user.id, is_org_admin: !user.is_org_admin });
-    if ('error' in result) setActionError(result.error);
-    else refresh();
+    const next = !user.is_org_admin;
+    patchUser(user.id, { is_org_admin: next });
+    const result = await updateUser({ userId: user.id, is_org_admin: next });
+    if ('error' in result) {
+      revertUser(user);
+      setActionError(result.error);
+    }
   }
+
+  // ---------------------------------------------------------------------------
+  // Toggle attendance permission
+  // ---------------------------------------------------------------------------
 
   async function handleToggleAttendance(user: Profile) {
     setActionError(null);
-    const result = await updateUser({ userId: user.id, can_mark_attendance: !user.can_mark_attendance });
-    if ('error' in result) setActionError(result.error);
-    else refresh();
+    const next = !user.can_mark_attendance;
+    patchUser(user.id, { can_mark_attendance: next });
+    const result = await updateUser({ userId: user.id, can_mark_attendance: next });
+    if ('error' in result) {
+      revertUser(user);
+      setActionError(result.error);
+    }
   }
+
+  // ---------------------------------------------------------------------------
+  // Role change
+  // ---------------------------------------------------------------------------
 
   async function handleRoleChange(user: Profile, roleId: string) {
     setActionError(null);
-    // Empty string means "unassign" — we send null to the server
-    const result = await updateUser({ userId: user.id, role_id: roleId === '' ? null : roleId });
-    if ('error' in result) setActionError(result.error);
-    else refresh();
+    const next = roleId === '' ? null : roleId;
+    patchUser(user.id, { role_id: next });
+    const result = await updateUser({ userId: user.id, role_id: next });
+    if ('error' in result) {
+      revertUser(user);
+      setActionError(result.error);
+    }
   }
 
-  const active = users.filter((u) => u.is_active);
-  const inactive = users.filter((u) => !u.is_active);
+  // ---------------------------------------------------------------------------
+  // Invite — refresh after success since we need the full Profile from the DB
+  // ---------------------------------------------------------------------------
+
+  function handleInviteSuccess() {
+    setShowInvite(false);
+    startTransition(() => router.refresh());
+  }
+
+  const active   = userList.filter((u) => u.is_active);
+  const inactive = userList.filter((u) => !u.is_active);
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="flex items-center justify-between gap-4">
         <div>
           <h1 className="text-xl font-semibold text-foreground">Team Members</h1>
@@ -76,32 +124,26 @@ export function UsersTable({ users, roles, currentUserId }: Props) {
         </button>
       </div>
 
-      {/* Invite modal */}
       {showInvite && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-md rounded-xl border border-border bg-background shadow-lg p-6 space-y-5">
             <div className="flex items-center justify-between">
               <h2 className="text-base font-semibold text-foreground">Invite team member</h2>
-              <button
-                onClick={() => setShowInvite(false)}
-                className="text-muted-foreground hover:text-foreground text-xl leading-none"
-              >
+              <button onClick={() => setShowInvite(false)} className="text-muted-foreground hover:text-foreground text-xl leading-none">
                 ×
               </button>
             </div>
-            <InviteUserForm onSuccess={() => { setShowInvite(false); refresh(); }} />
+            <InviteUserForm onSuccess={handleInviteSuccess} />
           </div>
         </div>
       )}
 
-      {/* Error banner */}
       {actionError && (
         <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3">
           <p className="text-sm text-destructive">{actionError}</p>
         </div>
       )}
 
-      {/* Active users table */}
       <div className="rounded-lg border border-border overflow-x-auto">
         <table className="w-full text-sm min-w-[640px]">
           <thead className="bg-muted/40 border-b border-border">
@@ -117,9 +159,7 @@ export function UsersTable({ users, roles, currentUserId }: Props) {
           <tbody className="divide-y divide-border">
             {active.length === 0 && (
               <tr>
-                <td colSpan={6} className="text-center px-4 py-8 text-muted-foreground">
-                  No active members
-                </td>
+                <td colSpan={6} className="text-center px-4 py-8 text-muted-foreground">No active members</td>
               </tr>
             )}
             {active.map((user) => {
@@ -134,14 +174,10 @@ export function UsersTable({ users, roles, currentUserId }: Props) {
                   </td>
                   <td className="px-4 py-3 text-muted-foreground">{user.email}</td>
 
-                  {/* Role dropdown */}
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-1.5">
                       {assignedRole && (
-                        <span
-                          className="w-2 h-2 rounded-full shrink-0"
-                          style={{ backgroundColor: assignedRole.colour }}
-                        />
+                        <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: assignedRole.colour }} />
                       )}
                       <select
                         value={user.role_id ?? ''}
@@ -151,15 +187,12 @@ export function UsersTable({ users, roles, currentUserId }: Props) {
                       >
                         <option value="">— no role —</option>
                         {roles.map((r) => (
-                          <option key={r.id} value={r.id}>
-                            {r.name}
-                          </option>
+                          <option key={r.id} value={r.id}>{r.name}</option>
                         ))}
                       </select>
                     </div>
                   </td>
 
-                  {/* Admin toggle */}
                   <td className="px-4 py-3 text-center">
                     <button
                       onClick={() => handleToggleAdmin(user)}
@@ -175,7 +208,6 @@ export function UsersTable({ users, roles, currentUserId }: Props) {
                     </button>
                   </td>
 
-                  {/* Attendance toggle */}
                   <td className="px-4 py-3 text-center">
                     <button
                       onClick={() => handleToggleAttendance(user)}
@@ -194,7 +226,7 @@ export function UsersTable({ users, roles, currentUserId }: Props) {
                   <td className="px-4 py-3 text-right">
                     {user.id !== currentUserId && (
                       <button
-                        onClick={() => handleDeactivate(user.id, user.full_name)}
+                        onClick={() => handleDeactivate(user)}
                         disabled={isPending}
                         className="text-xs text-destructive hover:underline disabled:opacity-50"
                       >
@@ -209,7 +241,6 @@ export function UsersTable({ users, roles, currentUserId }: Props) {
         </table>
       </div>
 
-      {/* Inactive users */}
       {inactive.length > 0 && (
         <details className="group">
           <summary className="text-sm text-muted-foreground cursor-pointer select-none list-none flex items-center gap-1.5">

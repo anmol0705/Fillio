@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useTransition } from 'react';
-import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import {
   useReactTable,
@@ -23,11 +22,11 @@ import { deleteTask } from '@/actions/tasks';
 import type { TaskListItem } from '@/types';
 
 interface Props {
-  tasks: TaskListItem[];
+  tasks:    TaskListItem[];
+  onRemove: (id: string) => void;
 }
 
-export function TasksTable({ tasks }: Props) {
-  const router = useRouter();
+export function TasksTable({ tasks, onRemove }: Props) {
   const [globalFilter, setGlobalFilter] = useState('');
   const [isPending, startTransition]    = useTransition();
 
@@ -36,10 +35,7 @@ export function TasksTable({ tasks }: Props) {
       accessorKey: 'title',
       header: 'Title',
       cell: ({ row }) => (
-        <Link
-          href={`/dashboard/tasks/${row.original.id}`}
-          className="font-medium text-primary hover:underline line-clamp-1"
-        >
+        <Link href={`/dashboard/tasks/${row.original.id}`} className="font-medium text-primary hover:underline line-clamp-1">
           {row.original.title}
         </Link>
       ),
@@ -102,10 +98,15 @@ export function TasksTable({ tasks }: Props) {
             disabled={isPending}
             onClick={() => {
               if (!confirm('Delete this task?')) return;
+              // Remove from UI immediately, then call server
+              onRemove(task.id);
               startTransition(async () => {
                 const res = await deleteTask(task.id);
-                if ('error' in res) { alert(res.error); return; }
-                router.refresh();
+                if ('error' in res) {
+                  // Can't easily un-remove from list here since parent owns state.
+                  // A toast would be ideal, but for now alert is fine.
+                  alert(res.error);
+                }
               });
             }}
           >
@@ -117,13 +118,13 @@ export function TasksTable({ tasks }: Props) {
   ];
 
   const table = useReactTable({
-    data: tasks,
+    data:                 tasks,
     columns,
-    state:              { globalFilter },
+    state:                { globalFilter },
     onGlobalFilterChange: setGlobalFilter,
-    getCoreRowModel:    getCoreRowModel(),
-    getFilteredRowModel: getFilteredRowModel(),
-    getSortedRowModel:  getSortedRowModel(),
+    getCoreRowModel:      getCoreRowModel(),
+    getFilteredRowModel:  getFilteredRowModel(),
+    getSortedRowModel:    getSortedRowModel(),
   });
 
   return (
