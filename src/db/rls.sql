@@ -475,6 +475,100 @@ CREATE POLICY "events: creator or admin can delete"
 
 
 -- =============================================================================
+-- TASK_FILES
+-- Task members can read files on tasks they can see.
+-- Any task member (editor+) can upload. Only uploader or owner can delete.
+-- Actual bytes live in Supabase Storage (see bucket policy below).
+-- =============================================================================
+
+ALTER TABLE task_files ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "task_files: member can read" ON task_files;
+CREATE POLICY "task_files: member can read"
+  ON task_files FOR SELECT
+  USING (
+    org_id = get_my_org_id()
+    AND is_active = true
+    AND is_task_member(task_id)
+  );
+
+DROP POLICY IF EXISTS "task_files: member can insert" ON task_files;
+CREATE POLICY "task_files: member can insert"
+  ON task_files FOR INSERT
+  WITH CHECK (
+    org_id = get_my_org_id()
+    AND uploaded_by = auth.uid()
+    AND is_task_member(task_id)
+  );
+
+-- Soft delete only — uploader or task owner can deactivate
+DROP POLICY IF EXISTS "task_files: uploader or owner can delete" ON task_files;
+CREATE POLICY "task_files: uploader or owner can delete"
+  ON task_files FOR UPDATE
+  USING (
+    org_id = get_my_org_id()
+    AND (uploaded_by = auth.uid() OR is_task_owner(task_id, auth.uid()))
+  )
+  WITH CHECK (
+    org_id = get_my_org_id()
+    AND (uploaded_by = auth.uid() OR is_task_owner(task_id, auth.uid()))
+  );
+
+
+-- =============================================================================
+-- STORAGE BUCKET: task-files
+-- Run these in Supabase SQL Editor to secure the storage bucket.
+-- Path structure: {org_id}/{task_id}/{uuid}-{filename}
+-- =============================================================================
+
+-- Allow task members to upload to their org/task path
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES (
+  'task-files',
+  'task-files',
+  false,
+  20971520,  -- 20 MB
+  ARRAY[
+    'application/pdf',
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'text/csv',
+    'image/jpeg',
+    'image/png',
+    'image/webp'
+  ]
+)
+ON CONFLICT (id) DO UPDATE SET
+  file_size_limit   = EXCLUDED.file_size_limit,
+  allowed_mime_types = EXCLUDED.allowed_mime_types;
+
+-- Storage SELECT — task members can read their org's files
+DROP POLICY IF EXISTS "task-files: member can read" ON storage.objects;
+CREATE POLICY "task-files: member can read"
+  ON storage.objects FOR SELECT
+  USING (
+    bucket_id = 'task-files'
+    AND (storage.foldername(name))[1] = get_my_org_id()::text
+    AND is_task_member((storage.foldername(name))[2]::uuid)
+  );
+
+-- Storage INSERT — task members can upload to their org/task path
+DROP POLICY IF EXISTS "task-files: member can upload" ON storage.objects;
+CREATE POLICY "task-files: member can upload"
+  ON storage.objects FOR INSERT
+  WITH CHECK (
+    bucket_id = 'task-files'
+    AND (storage.foldername(name))[1] = get_my_org_id()::text
+    AND is_task_member((storage.foldername(name))[2]::uuid)
+  );
+
+-- Storage DELETE — only via service role (server action uses admin client)
+-- No user-facing DELETE policy — deletion is always done server-side
+
+
+-- =============================================================================
 -- DONE
 -- =============================================================================
 -- Verify with:

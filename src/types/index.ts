@@ -3,7 +3,7 @@ import type {
   orgs, roles, profiles, clients,
   tasks, task_access, task_audit_log, task_messages,
   reporting_relationships, attendance_records, recurring_templates,
-  calendar_events, notifications,
+  calendar_events, notifications, task_files,
 } from '@/db/schema';
 
 export type Org                   = InferSelectModel<typeof orgs>;
@@ -65,3 +65,10 @@ export type CalendarEventWithNames = CalendarEvent & {
 };
 
 export type Notification = InferSelectModel<typeof notifications>;
+
+export type TaskFile = InferSelectModel<typeof task_files>;
+
+// Shape used in the UI — file + uploader name resolved
+export type TaskFileWithUploader = TaskFile & {
+  uploader: { id: string; full_name: string };
+};

@@ -277,6 +277,34 @@ export const attendance_records = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// task_files
+//
+// File attachments on tasks. Bytes live in Supabase Storage bucket "task-files"
+// at path {org_id}/{task_id}/{uuid}-{filename}. This table stores metadata only.
+// Soft delete — is_active = false, file is removed from storage separately.
+// ---------------------------------------------------------------------------
+
+export const task_files = pgTable(
+  'task_files',
+  {
+    id:           uuid('id').primaryKey().defaultRandom(),
+    task_id:      uuid('task_id').notNull().references(() => tasks.id),
+    org_id:       uuid('org_id').notNull().references(() => orgs.id),
+    uploaded_by:  uuid('uploaded_by').notNull().references(() => profiles.id),
+    file_name:    text('file_name').notNull(),
+    file_size:    integer('file_size').notNull(),
+    mime_type:    text('mime_type').notNull(),
+    storage_path: text('storage_path').notNull(),
+    is_active:    boolean('is_active').notNull().default(true),
+    created_at:   timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('task_files_task_idx').on(table.task_id),
+    index('task_files_org_idx').on(table.org_id),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // recurring_templates
 //
 // Admin-created templates that the cron job uses to spawn real tasks.
