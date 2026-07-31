@@ -46,7 +46,12 @@ export async function middleware(request: NextRequest) {
     return redirectResponse;
   }
 
-  if (user && isAuthPage) {
+  // /login?error=... means the app has already signed out the user and is
+  // showing an error (e.g. no_profile). Don't redirect an authenticated session
+  // back to /dashboard here — that causes an infinite loop with layout.tsx.
+  const loginHasError = pathname === '/login' && request.nextUrl.searchParams.has('error');
+
+  if (user && isAuthPage && !loginHasError) {
     const url = request.nextUrl.clone();
     url.pathname = '/dashboard';
     const redirectResponse = NextResponse.redirect(url);

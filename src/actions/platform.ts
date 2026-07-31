@@ -49,7 +49,12 @@ const CreateOrgSchema = z.object({
     .max(40)
     .regex(/^[a-z0-9-]+$/, 'Slug must be lowercase letters, numbers, and hyphens only'),
   admin_name:  z.string().min(2, 'Name must be at least 2 characters').max(100),
-  admin_email: z.string().email('Invalid email address'),
+  admin_email: z
+    .string()
+    .email('Invalid email address')
+    .refine(v => !v.toLowerCase().endsWith('@filio.internal'), {
+      message: 'Cannot use an internal domain as the admin email',
+    }),
 });
 
 export async function createOrg(raw: unknown): Promise<

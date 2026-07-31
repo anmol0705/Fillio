@@ -475,6 +475,28 @@ CREATE POLICY "events: creator or admin can delete"
 
 
 -- =============================================================================
+-- HELPER: is_task_owner
+-- Returns true if user_id has 'owner' access level on the given task.
+-- Used in task_files DELETE policy. SECURITY DEFINER so it runs as owner
+-- and cannot be bypassed by search_path manipulation.
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION is_task_owner(p_task_id uuid, p_user_id uuid)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM task_access
+    WHERE task_access.task_id = p_task_id
+      AND task_access.user_id = p_user_id
+      AND task_access.level = 'owner'
+  );
+$$;
+
+-- =============================================================================
 -- TASK_FILES
 -- Task members can read files on tasks they can see.
 -- Any task member (editor+) can upload. Only uploader or owner can delete.

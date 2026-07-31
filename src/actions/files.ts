@@ -282,20 +282,16 @@ export async function deleteFile(fileId: string): Promise<
 
   const admin = createAdminClient();
 
-  // Remove bytes from storage first
-  const { error: storageError } = await admin.storage
-    .from(BUCKET)
-    .remove([fileRow.storage_path]);
-
-  if (storageError) {
-    return { error: `Storage deletion failed: ${storageError.message}` };
-  }
-
-  // Soft delete the metadata row
+  // Soft-delete metadata first — if storage removal fails, the row is already
+  // deactivated so no signed URLs can be issued for the missing bytes.
   await db
     .update(task_files)
     .set({ is_active: false })
     .where(and(eq(task_files.id, fileId), eq(task_files.org_id, profile.org_id)));
+
+  // Best-effort storage removal — orphaned bytes are a cleanup concern,
+  // not a data integrity breach (metadata is already deactivated above).
+  await admin.storage.from(BUCKET).remove([fileRow.storage_path]);
 
   return { error: null };
 }

@@ -16,19 +16,37 @@ export async function resolveLoginIdentifier(
 ): Promise<{ email: string } | { error: string }> {
   const trimmed = input.trim().toLowerCase();
 
-  // If it looks like an email, use it directly
   if (trimmed.includes('@')) {
-    return { email: trimmed };
+    // Email path — still need to verify the account exists and is active.
+    // Reject @filio.internal attempts outright (synthetic internal domain).
+    if (trimmed.endsWith('@filio.internal')) {
+      return { error: 'Invalid credentials. Please use your User ID instead.' };
+    }
+
+    const profile = await db.query.profiles.findFirst({
+      where: eq(profiles.email, trimmed),
+      columns: { email: true, is_active: true },
+    });
+
+    // Use a single generic message to avoid confirming whether an email exists.
+    if (!profile || !profile.is_active) {
+      return { error: 'Invalid credentials.' };
+    }
+
+    return { email: profile.email };
   }
 
-  // Otherwise treat as user_code — look up the email in profiles
+  // user_code path — look up the synthetic email in profiles.
   const profile = await db.query.profiles.findFirst({
     where: eq(profiles.user_code, trimmed),
     columns: { email: true, is_active: true },
   });
 
-  if (!profile) return { error: 'User ID not found. Check your user ID or use your email address.' };
-  if (!profile.is_active) return { error: 'Your account has been deactivated. Contact your administrator.' };
+  // Single generic message — do not distinguish "not found" from "deactivated"
+  // to prevent user_code enumeration attacks.
+  if (!profile || !profile.is_active) {
+    return { error: 'Invalid credentials.' };
+  }
 
   return { email: profile.email };
 }
