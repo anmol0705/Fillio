@@ -96,6 +96,7 @@ export const profiles = pgTable(
     role_id:             uuid('role_id').references(() => roles.id),
     full_name:           text('full_name').notNull(),
     email:               text('email').notNull(),
+    user_code:           text('user_code').unique(),
     is_active:           boolean('is_active').notNull().default(true),
     is_org_admin:        boolean('is_org_admin').notNull().default(false),
     can_mark_attendance: boolean('can_mark_attendance').notNull().default(false),

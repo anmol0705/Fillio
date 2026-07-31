@@ -14,6 +14,7 @@ import {
   CalendarCheck,
   ClipboardList,
   ShieldCheck,
+  Settings,
   X,
 } from 'lucide-react';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -153,6 +154,19 @@ export function AppSidebar({ profile, mobileOpen = false, onMobileClose }: Props
 
       {/* User footer */}
       <div className="border-t border-sidebar-border px-3 py-4">
+        <Link
+          href="/dashboard/settings"
+          onClick={onMobileClose}
+          className={cn(
+            'flex items-center gap-3 px-3 py-2.5 rounded-md text-sm transition-colors min-h-[44px] mb-1',
+            isActive('/dashboard/settings')
+              ? 'bg-sidebar-primary text-sidebar-primary-foreground font-medium'
+              : 'text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground',
+          )}
+        >
+          <Settings className="w-4 h-4 shrink-0" />
+          Settings
+        </Link>
         <div className="flex items-center gap-3 px-3 py-2 rounded-md">
           <Avatar className="w-8 h-8 shrink-0">
             <AvatarFallback className="text-xs bg-sidebar-primary text-sidebar-primary-foreground">
@@ -163,7 +177,9 @@ export function AppSidebar({ profile, mobileOpen = false, onMobileClose }: Props
             <p className="text-sm font-medium truncate text-sidebar-foreground">
               {profile.full_name}
             </p>
-            <p className="text-xs text-muted-foreground truncate">{profile.email}</p>
+            <p className="text-xs text-muted-foreground truncate">
+              {profile.user_code ? `@${profile.user_code}` : profile.email}
+            </p>
           </div>
           <form action="/auth/logout" method="POST">
             <button

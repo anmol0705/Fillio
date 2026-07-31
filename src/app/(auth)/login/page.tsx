@@ -3,22 +3,26 @@
 import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { signInWithPassword, signInWithMagicLink } from '@/lib/auth/signIn';
+import { resolveLoginIdentifier } from '@/actions/auth';
 
 function LoginForm() {
   const searchParams = useSearchParams();
   const router = useRouter();
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [mode, setMode] = useState<'password' | 'magic'>('password');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [magicSent, setMagicSent] = useState(false);
+
+  const [identifier, setIdentifier] = useState('');   // email or user_code
+  const [password,   setPassword]   = useState('');
+  const [mode,       setMode]       = useState<'password' | 'magic'>('password');
+  const [loading,    setLoading]    = useState(false);
+  const [error,      setError]      = useState('');
+  const [magicSent,  setMagicSent]  = useState(false);
+
+  // Magic link only works with real email addresses
+  const isEmail      = identifier.includes('@');
+  const showMagicTab = true; // always show tab but disable if not email
 
   useEffect(() => {
     if (searchParams.get('error') === 'no_profile') {
-      setError(
-        'Your account has not been set up yet. Please contact your administrator.'
-      );
+      setError('Your account has not been set up yet. Please contact your administrator.');
     }
   }, [searchParams]);
 
@@ -28,7 +32,15 @@ function LoginForm() {
     setError('');
 
     if (mode === 'password') {
-      const result = await signInWithPassword(email, password);
+      // Resolve user_code → email if needed
+      const resolved = await resolveLoginIdentifier(identifier);
+      if ('error' in resolved) {
+        setError(resolved.error);
+        setLoading(false);
+        return;
+      }
+
+      const result = await signInWithPassword(resolved.email, password);
       if (!result.success) {
         setError(result.error);
         setLoading(false);
@@ -37,7 +49,13 @@ function LoginForm() {
       router.push('/dashboard');
       router.refresh();
     } else {
-      const result = await signInWithMagicLink(email);
+      // Magic link requires a real email
+      if (!isEmail) {
+        setError('Magic link requires a real email address, not a User ID.');
+        setLoading(false);
+        return;
+      }
+      const result = await signInWithMagicLink(identifier);
       if (!result.success) {
         setError(result.error);
         setLoading(false);
@@ -53,7 +71,7 @@ function LoginForm() {
       <div className="text-center">
         <h2 className="text-xl font-semibold mb-2">Check your email</h2>
         <p className="text-sm text-muted-foreground">
-          We sent a magic link to <strong>{email}</strong>
+          We sent a magic link to <strong>{identifier}</strong>
         </p>
       </div>
     );
@@ -99,14 +117,23 @@ function LoginForm() {
       </div>
 
       <div className="space-y-3">
-        <input
-          type="email"
-          placeholder="Email address"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          required
-          className="w-full rounded-md border border-input bg-background px-3 py-3 text-sm outline-none focus:ring-2 focus:ring-ring min-h-[48px]"
-        />
+        <div>
+          <input
+            type="text"
+            placeholder={mode === 'magic' ? 'Email address' : 'Email or User ID'}
+            value={identifier}
+            onChange={(e) => setIdentifier(e.target.value)}
+            required
+            autoComplete="username"
+            className="w-full rounded-md border border-input bg-background px-3 py-3 text-sm outline-none focus:ring-2 focus:ring-ring min-h-[48px]"
+          />
+          {mode === 'password' && !isEmail && identifier.length > 0 && (
+            <p className="text-xs text-muted-foreground mt-1.5">
+              Signing in with User ID: <strong>{identifier.trim().toLowerCase()}</strong>
+            </p>
+          )}
+        </div>
+
         {mode === 'password' && (
           <input
             type="password"
@@ -114,6 +141,7 @@ function LoginForm() {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
+            autoComplete="current-password"
             className="w-full rounded-md border border-input bg-background px-3 py-3 text-sm outline-none focus:ring-2 focus:ring-ring min-h-[48px]"
           />
         )}
