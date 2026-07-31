@@ -1,55 +1,35 @@
 'use client';
 
-import { useState } from 'react';
-import { createClient } from '@/lib/supabase/client';
+import { useState, useTransition } from 'react';
+import { changePassword } from '@/actions/settings';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 
 export function ChangePasswordForm() {
-  const [current,   setCurrent]   = useState('');
-  const [next,      setNext]      = useState('');
-  const [confirm,   setConfirm]   = useState('');
-  const [loading,   setLoading]   = useState(false);
-  const [error,     setError]     = useState('');
-  const [success,   setSuccess]   = useState(false);
+  const [isPending, start] = useTransition();
+  const [current,  setCurrent]  = useState('');
+  const [next,     setNext]     = useState('');
+  const [confirm,  setConfirm]  = useState('');
+  const [error,    setError]    = useState('');
+  const [success,  setSuccess]  = useState(false);
 
-  async function handleSubmit(e: React.FormEvent) {
+  function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(''); setSuccess(false);
 
     if (next !== confirm) { setError('Passwords do not match.'); return; }
     if (next.length < 8)  { setError('Password must be at least 8 characters.'); return; }
 
-    setLoading(true);
-    const supabase = createClient();
-
-    // Re-authenticate first to verify current password
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user?.email) { setError('Not authenticated.'); setLoading(false); return; }
-
-    const { error: signInError } = await supabase.auth.signInWithPassword({
-      email:    user.email,
-      password: current,
+    start(async () => {
+      const res = await changePassword({ current_password: current, new_password: next });
+      if (res.error) {
+        setError(res.error);
+      } else {
+        setSuccess(true);
+        setCurrent(''); setNext(''); setConfirm('');
+      }
     });
-
-    if (signInError) {
-      setError('Current password is incorrect.');
-      setLoading(false);
-      return;
-    }
-
-    // Now update to the new password
-    const { error: updateError } = await supabase.auth.updateUser({ password: next });
-
-    if (updateError) {
-      setError(updateError.message);
-    } else {
-      setSuccess(true);
-      setCurrent(''); setNext(''); setConfirm('');
-    }
-
-    setLoading(false);
   }
 
   return (
@@ -103,8 +83,8 @@ export function ChangePasswordForm() {
         />
       </div>
 
-      <Button type="submit" disabled={loading} className="w-full">
-        {loading ? 'Updating…' : 'Change password'}
+      <Button type="submit" disabled={isPending} className="w-full">
+        {isPending ? 'Updating…' : 'Change password'}
       </Button>
     </form>
   );
