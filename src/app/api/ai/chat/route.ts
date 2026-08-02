@@ -1,10 +1,8 @@
 import { streamText, convertToCoreMessages } from 'ai';
-import { anthropic } from '@ai-sdk/anthropic';
 import { getCurrentUser } from '@/lib/auth/getUser';
 import { db } from '@/db';
-import { orgs } from '@/db/schema';
-import { eq } from 'drizzle-orm';
 import { createAiTools } from '@/lib/ai/tools';
+import { getModel } from '@/lib/ai/model';
 
 export const dynamic = 'force-dynamic';
 
@@ -46,7 +44,7 @@ export async function POST(req: Request) {
   const tools = createAiTools(profile.org_id, profile.is_org_admin, user.id);
 
   const result = streamText({
-    model:    anthropic('claude-sonnet-4-6'),
+    model:    getModel(),
     system:   systemPrompt(org?.name ?? 'your'),
     messages: convertToCoreMessages(body.messages as Parameters<typeof convertToCoreMessages>[0]),
     tools,
