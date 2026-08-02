@@ -10,7 +10,7 @@
     "seed": "tsx --env-file=.env.local src/db/seed.ts"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^0.0.56",
+    "@ai-sdk/anthropic": "^4.0.27",
     "@ai-sdk/groq": "^4.0.19",
     "@ai-sdk/openai": "^4.0.27",
     "@base-ui/react": "^1.6.0",
