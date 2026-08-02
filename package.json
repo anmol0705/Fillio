@@ -10,6 +10,7 @@
     "seed": "tsx --env-file=.env.local src/db/seed.ts"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^0.0.56",
     "@base-ui/react": "^1.6.0",
     "@dagrejs/dagre": "^3.0.0",
     "@dnd-kit/core": "^6.3.1",
@@ -23,6 +24,7 @@
     "@tanstack/react-query-devtools": "^5.101.0",
     "@tanstack/react-table": "^8.21.3",
     "@xyflow/react": "^12.11.2",
+    "ai": "^4.3.19",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.4.0",

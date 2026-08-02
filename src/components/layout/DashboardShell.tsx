@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { AppSidebar } from './AppSidebar';
 import { Header } from './Header';
+import { AgentPanel } from '@/components/ai/AgentPanel';
 import type { Profile, Notification } from '@/types';
 
 interface Props {
@@ -46,6 +47,9 @@ export function DashboardShell({
           </div>
         </main>
       </div>
+
+      {/* AI assistant — available on every dashboard page */}
+      <AgentPanel />
     </div>
   );
 }
